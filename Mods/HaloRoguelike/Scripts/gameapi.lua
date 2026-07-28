@@ -22,7 +22,11 @@ local Gameapi = {}
 -- Update these from the UObject dump (docs/DISCOVERY.md).
 local CANDIDATES = {
     -- §7.6 the live user-settings object carrying ModifierPreset/PlayerTraits.
+    -- CONFIRMED on-device 2026-07-28: instances are MeteoriteGameUserSettings
+    -- (/Engine/Transient.MeteoriteGameUserSettings_*), found via the
+    -- HaloUserSettings probe — Meteorite* is the concrete subclass.
     user_settings_class = {
+        "MeteoriteGameUserSettings",
         "HaloUserSettings",
         "HaloGlobalGameUserSettings",
         "HaloGameUserSettings",
@@ -326,6 +330,7 @@ function Gameapi.discovery_dump()
     Gameapi.get_build_version()
 
     local probes = {
+        "MeteoriteGameUserSettings",
         "HaloUserSettings", "HaloGlobalGameUserSettings", "GameUserSettings",
         "CampaignMissionLauncher", "MissionDeployManager", "CampaignManager",
         "HaloCampaignSubsystem", "BlamCampaignSubsystem", "CampaignSaveGame",
