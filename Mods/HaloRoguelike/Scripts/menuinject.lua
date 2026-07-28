@@ -60,6 +60,19 @@ local function try(fn, ...)
     return nil
 end
 
+-- FString-safe stringification (plain tostring on UE4SS FStrings yields the
+-- object address, not the text).
+local function fstr(v)
+    if type(v) == "string" then return v end
+    local s = try(function() return v:ToString() end)
+    if type(s) == "string" then return s end
+    return tostring(v)
+end
+
+local function full_name(obj)
+    return fstr(try(function() return obj:GetFullName() end) or "?")
+end
+
 local function find_first_valid(short_class)
     local all = try(FindAllOf, short_class)
     if not all then return nil end
@@ -106,7 +119,7 @@ local function hook_clicks(entry_class_name)
                 function(Context)
                     local this = Context:get()
                     if injected and this:IsValid()
-                        and this:GetFullName() == injected:GetFullName() then
+                        and full_name(this) == full_name(injected) then
                         Log.info("menuinject: ROGUELIKE entry activated")
                         ExecuteInGameThread(function()
                             if on_activate then on_activate() end
@@ -136,7 +149,7 @@ local function attempt()
         screen = find_first_valid(cls)
         if screen then
             Log.discover("menuinject: menu screen found: %s (%s)",
-                cls, tostring(screen:GetFullName()))
+                cls, full_name(screen))
             break
         end
     end
@@ -147,7 +160,7 @@ local function attempt()
     for _, cls in ipairs(CANDIDATES.menu_entry) do
         template = find_first_valid(cls)
         if template then
-            template_class_name = tostring(template:GetClass():GetFullName())
+            template_class_name = full_name(template:GetClass())
                 :gsub("^%S+%s", "") -- strip "WidgetBlueprintGeneratedClass " prefix
             Log.discover("menuinject: entry template: %s (%s)", cls, template_class_name)
             break
@@ -180,7 +193,7 @@ local function attempt()
     local added = try(function() return parent:AddChild(clone) end)
     if not added then
         Log.discover("menuinject: parent:AddChild failed (panel class: %s)",
-            tostring(try(function() return parent:GetClass():GetFullName() end)))
+            full_name(try(function() return parent:GetClass() end) or "?"))
         return false
     end
 

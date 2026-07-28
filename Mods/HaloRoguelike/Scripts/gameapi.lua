@@ -79,6 +79,21 @@ local function try(label, fn, ...)
     return a, b
 end
 
+-- FString/FName-safe stringification: UE4SS string-likes need :ToString(),
+-- plain tostring() yields "FString: 0x...".
+local function fstr(v)
+    if type(v) == "string" then return v end
+    local ok, s = pcall(function() return v:ToString() end)
+    if ok and type(s) == "string" then return s end
+    return tostring(v)
+end
+
+local function full_name(obj)
+    local ok, n = pcall(function() return obj:GetFullName() end)
+    if not ok then return "?" end
+    return fstr(n)
+end
+
 local function find_first(short_class)
     local obj = try("FindFirstOf(" .. short_class .. ")", FindFirstOf, short_class)
     if obj and obj:IsValid() then return obj end
@@ -96,9 +111,21 @@ function Gameapi.get_build_version()
     if ksl and ksl:IsValid() then
         local v = try("GetBuildVersion", function() return ksl:GetBuildVersion() end)
         if v then
-            R.build_version = tostring(v)
-            Log.info("gameapi: build version = %s", R.build_version)
-            return R.build_version
+            -- UE4SS returns FString userdata; tostring() would yield the
+            -- object address ("FString: 0x..."), not the text.
+            local s
+            if type(v) == "string" then
+                s = v
+            else
+                s = try("FString:ToString", function() return v:ToString() end)
+            end
+            if s and not s:match("^FString:") then
+                R.build_version = s
+                Log.info("gameapi: build version = %s", R.build_version)
+                return R.build_version
+            end
+            Log.warn("gameapi: build version FString could not be converted (%s)",
+                tostring(v))
         end
     end
     Log.warn("gameapi: could not read build version")
@@ -122,7 +149,7 @@ function Gameapi.resolve()
             if obj then
                 R.user_settings = obj
                 Log.discover("user_settings RESOLVED via FindFirstOf(%q): %s",
-                    name, tostring(obj:GetFullName()))
+                    name, full_name(obj))
                 break
             else
                 Log.discover("user_settings: no instance of %q", name)
@@ -135,7 +162,7 @@ function Gameapi.resolve()
             local obj = find_first(cls)
             if obj then
                 Log.discover("mission_launcher candidate instance: %s",
-                    tostring(obj:GetFullName()))
+                    full_name(obj))
                 for _, fn in ipairs(CANDIDATES.mission_launch_fn) do
                     local has = try("probe " .. cls .. ":" .. fn, function()
                         return obj[fn] ~= nil
@@ -310,8 +337,7 @@ function Gameapi.discovery_dump()
             Log.discover("%s: %d instance(s)", cls, #all)
             for i, obj in ipairs(all) do
                 if i > 5 then Log.discover("  ... (%d more)", #all - 5) break end
-                local name = try("GetFullName", function() return obj:GetFullName() end)
-                Log.discover("  %s", tostring(name))
+                Log.discover("  %s", full_name(obj))
             end
         else
             Log.discover("%s: none loaded", cls)
