@@ -64,6 +64,10 @@ local injected = nil       -- our injected entry widget, once created
 local on_activate = nil    -- callback: open the roguelike panel
 local click_hooked = false
 local last_log = nil       -- de-spam: repeat log lines are suppressed
+local cached_screen, cached_template, cached_parent = nil, nil, nil
+local hover_watch_started = false
+local status_rows = {}     -- extra native rows rendering run state in-menu
+local last_status = nil
 
 -- Log only when the message changes, so the 5s retry loop stays quiet.
 local function log_state(fmt, ...)
@@ -116,28 +120,32 @@ end
 
 -- Set the entry's label. Tries a SetText API on the entry itself first (many
 -- games expose one on their button widget), then named TextBlock children.
-local function set_label(entry, text)
+local function set_label(entry, text, quiet)
     local ftext = make_ftext(text)
     if not ftext then
-        Log.discover("menuinject: could not construct FText — no label possible")
+        if not quiet then
+            Log.discover("menuinject: could not construct FText — no label possible")
+        end
         return false
     end
-    if ftext and try(function() entry:SetText(ftext) return true end) then
-        Log.discover("menuinject: label set via entry:SetText")
+    if try(function() entry:SetText(ftext) return true end) then
+        if not quiet then Log.discover("menuinject: label set via entry:SetText") end
         return true
     end
     for _, name in ipairs(CANDIDATES.entry_label_widgets) do
         local ok = try(function()
             local tb = entry[name]
-            if tb and tb:IsValid() and ftext then tb:SetText(ftext) return true end
+            if tb and tb:IsValid() then tb:SetText(ftext) return true end
         end)
         if ok then
-            Log.discover("menuinject: label set via child %q", name)
+            if not quiet then Log.discover("menuinject: label set via child %q", name) end
             return true
         end
     end
-    Log.discover("menuinject: could NOT set label — dump the entry widget tree "
-        .. "and add the TextBlock name to CANDIDATES.entry_label_widgets")
+    if not quiet then
+        Log.discover("menuinject: could NOT set label — dump the entry widget tree "
+            .. "and add the TextBlock name to CANDIDATES.entry_label_widgets")
+    end
     return false
 end
 
@@ -167,6 +175,66 @@ local function hook_clicks(entry_class_name)
     end
     Log.discover("menuinject: no click hook resolved for %s — entry will show "
         .. "but not respond; F6 remains the entrance", entry_class_name)
+end
+
+-- Hover fallback: while the real click UFunction is unresolved, highlighting
+-- the ROGUELIKE row activates it (edge-triggered on hover).
+local hover_was = false
+function start_hover_watcher()
+    if hover_watch_started then return end
+    hover_watch_started = true
+    pcall(function()
+        LoopAsync(250, function()
+            if not injected or not try(function() return injected:IsValid() end) then
+                hover_watch_started = false
+                return true
+            end
+            local hovered = try(function() return injected:IsHovered() end)
+            if hovered and not hover_was then
+                hover_was = true
+                Log.info("menuinject: ROGUELIKE entry hovered — activating")
+                ExecuteInGameThread(function()
+                    if on_activate then on_activate() end
+                end)
+            elseif not hovered then
+                hover_was = false
+            end
+            return false
+        end)
+    end)
+end
+
+-- In-menu status rows: native rows under the menu list mirroring the run
+-- state (seed, floor, skulls, next action) so the mode is visible in-game.
+-- Rows are the same button widget class, made non-interactive.
+function Menuinject.set_status_lines(lines)
+    if not cached_parent or not cached_template or not cached_screen then
+        return false
+    end
+    local blob = table.concat(lines, "\n")
+    if blob == last_status then return true end
+    local wbl = try(StaticFindObject, "/Script/UMG.Default__WidgetBlueprintLibrary")
+    local owner = try(function() return cached_template:GetOwningPlayer() end)
+    for i = 1, #lines do
+        local row = status_rows[i]
+        if not (row and try(function() return row:IsValid() end)) then
+            row = wbl and try(function()
+                return wbl:Create(cached_screen, cached_template:GetClass(), owner)
+            end) or nil
+            if not row then return false end
+            try(function() cached_parent:AddChild(row) end)
+            status_rows[i] = row
+        end
+        set_label(row, lines[i], true)
+        -- 4 = SelfHitTestInvisible: rendered but not clickable/focusable.
+        try(function() row:SetVisibility(4) end)
+    end
+    for i = #lines + 1, #status_rows do
+        local row = status_rows[i]
+        if row then try(function() row:SetVisibility(1) end) end -- 1 = Collapsed
+    end
+    last_status = blob
+    return true
 end
 
 -- One injection attempt. Returns true when done (stops the retry loop).
@@ -249,9 +317,10 @@ local function attempt()
     end
 
     hook_clicks(template_class_name)
-    -- Until the click hook resolves, advertise the working key on the label.
-    set_label(clone, click_hooked and "ROGUELIKE" or "ROGUELIKE  [F6]")
+    set_label(clone, "ROGUELIKE")
     try(function() clone:SetVisibility(0) end) -- 0 = ESlateVisibility::Visible
+    cached_screen, cached_template, cached_parent = screen, template, parent
+    start_hover_watcher()
 
     injected = clone
     Log.info("menuinject: ROGUELIKE entry injected into the main menu")

@@ -309,6 +309,9 @@ local ok_loop = pcall(function()
         -- Render loop for the overlay (text backend prints only on change).
         if enabled then
             pcall(Ui.render, Gameapi.status())
+            -- Mirror the run state into native rows inside the main menu, so
+            -- the mode is visible in the game window itself.
+            pcall(function() Menuinject.set_status_lines(Ui.compact_lines()) end)
         end
         return false
     end)

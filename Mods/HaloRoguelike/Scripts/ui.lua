@@ -204,6 +204,46 @@ function Ui.panel_lines(capability_status)
     return lines
 end
 
+-- Compact lines for the in-menu native status rows (menuinject). Short lines
+-- only — the menu row widget clips long text.
+function Ui.compact_lines()
+    local run = State.run
+    if Ui.mode == "confirm_new_run" then
+        return {
+            "[F5] CONFIRM NEW RUN — save is backed up first",
+            "achievements likely disabled during the run",
+        }
+    end
+    if not run then
+        return { "[F5] new run  ·  [F6] full panel" }
+    end
+    if run.status ~= State.STATUS.ACTIVE then
+        local verdict = run.status == State.STATUS.WON and "RUN WON"
+            or run.status == State.STATUS.LOST and "RUN LOST" or "RUN ENDED"
+        return {
+            string.format("%s · seed %s · %d deaths", verdict, run.seed, run.deaths),
+            "[F5] close run (restores your save)",
+        }
+    end
+    local fl = run.floors[run.current_floor]
+    local names = {}
+    for _, id in ipairs(fl.new_skulls) do names[#names + 1] = skull_by_id(id).name end
+    local lines = {
+        string.format("%s  ·  %s", run.seed, Ui.corner_counter() or ""),
+        string.format("Floor %d: %s @ Rally %s · %s%s", fl.index,
+            mission_by_id(fl.mission_id).name, fl.rally,
+            fl.difficulty, fl.nerf and " +" or ""),
+        string.format("New skulls: %s · Vis: %s",
+            table.concat(names, ", "), vis_by_id(fl.visibility).name),
+    }
+    if run.floor_status == State.FLOOR.BRIEFING then
+        lines[#lines + 1] = "[F5] START FLOOR " .. fl.index
+    else
+        lines[#lines + 1] = "Floor in progress · [F5] mark floor complete"
+    end
+    return lines
+end
+
 -- ---------------------------------------------------------------- backends
 
 local have_imgui = type(_G.ImGui) == "table"
