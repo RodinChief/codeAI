@@ -241,6 +241,27 @@ local function finish_init(build_ok, build)
         if not Ui.visible then Ui.toggle() end
     end)
 
+    -- Map-load logging: captures real mission level names when a mission is
+    -- deployed (discovery for const.lua and for mission-complete detection —
+    -- a mission map returning to the Frontend map means the floor ended).
+    local ok_hook = pcall(function()
+        RegisterLoadMapPostHook(function(...)
+            local parts = {}
+            for i = 1, select("#", ...) do
+                local v = select(i, ...)
+                local ok, s = pcall(function()
+                    local obj = (type(v) ~= "string" and v.get) and v:get() or v
+                    local n = obj.GetFullName and obj:GetFullName() or obj
+                    if type(n) ~= "string" and n.ToString then n = n:ToString() end
+                    return tostring(n)
+                end)
+                if ok and s then parts[#parts + 1] = s end
+            end
+            Log.discover("map loaded: %s", table.concat(parts, " | "))
+        end)
+    end)
+    Log.info("main: map-load logging %s", ok_hook and "active" or "unavailable")
+
     if State.load() and State.run.status == State.STATUS.ACTIVE then
         Log.info("main: resumable run found (seed %s, floor %d)",
             State.run.seed, State.run.current_floor)

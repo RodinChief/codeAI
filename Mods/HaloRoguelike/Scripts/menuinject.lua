@@ -53,6 +53,16 @@ local CANDIDATES = {
 local injected = nil       -- our injected entry widget, once created
 local on_activate = nil    -- callback: open the roguelike panel
 local click_hooked = false
+local last_log = nil       -- de-spam: repeat log lines are suppressed
+
+-- Log only when the message changes, so the 5s retry loop stays quiet.
+local function log_state(fmt, ...)
+    local msg = string.format(fmt, ...)
+    if msg ~= last_log then
+        Log.discover("menuinject: %s", msg)
+        last_log = msg
+    end
+end
 
 local function try(fn, ...)
     local ok, res = pcall(fn, ...)
@@ -148,8 +158,7 @@ local function attempt()
     for _, cls in ipairs(CANDIDATES.menu_screen) do
         screen = find_first_valid(cls)
         if screen then
-            Log.discover("menuinject: menu screen found: %s (%s)",
-                cls, full_name(screen))
+            log_state("menu screen found: %s (%s)", cls, full_name(screen))
             break
         end
     end
@@ -167,8 +176,8 @@ local function attempt()
         end
     end
     if not template then
-        Log.discover("menuinject: screen present but no entry class matched — "
-            .. "dump widgets under the menu screen and extend CANDIDATES.menu_entry")
+        log_state("screen present but no entry class matched — press F7 for the "
+            .. "TextBlock scan and extend CANDIDATES.menu_entry")
         return false
     end
 
@@ -215,7 +224,7 @@ function Menuinject.start(activate_cb)
     on_activate = activate_cb
     local tries = 0
     local ok = pcall(function()
-        LoopAsync(2000, function()
+        LoopAsync(5000, function()
             tries = tries + 1
             local done = try(attempt) or false
             -- Menus get recreated (e.g. returning from a mission), so never

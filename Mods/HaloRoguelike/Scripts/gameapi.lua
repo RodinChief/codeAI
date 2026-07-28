@@ -349,8 +349,43 @@ function Gameapi.discovery_dump()
         end
     end
 
-    Log.discover("Next: open the UE4SS GUI, Dump Objects, then grep the dump for "
-        .. "InsertionPoint|RallyPoint|Skull|Campaign|Remix|StartMission|Deploy")
+    -- UI widget scan: read every TextBlock's text and log widgets that live
+    -- under menu-ish outers. The TextBlock showing "CAMPAIGN REMIX" pinpoints
+    -- the exact entry-button widget class menuinject needs to clone.
+    local tbs = try("FindAllOf(TextBlock)", FindAllOf, "TextBlock")
+    if tbs then
+        Log.discover("TextBlock scan: %d instances (menu-related shown)", #tbs)
+        local shown = 0
+        for _, tb in ipairs(tbs) do
+            if shown >= 80 then Log.discover("  ... (truncated at 80)") break end
+            local name = full_name(tb)
+            if name:lower():find("menu") or name:lower():find("frontend")
+                or name:lower():find("uilayout") then
+                local text = try("TextBlock:GetText", function()
+                    return fstr(tb:GetText())
+                end)
+                Log.discover("  text=%q  at %s", tostring(text), name)
+                shown = shown + 1
+            end
+        end
+    else
+        Log.discover("TextBlock scan: FindAllOf unavailable")
+    end
+
+    -- Where do saves actually live? List the Saved dir so saveguard can be
+    -- pointed at the right subfolder.
+    local Paths = require("paths")
+    local saved = Paths.saved_root()
+    if saved then
+        local dirs = Paths.list_dirs(saved)
+        Log.discover("Saved/ subdirectories (%d):", #dirs)
+        for _, d in ipairs(dirs) do
+            Log.discover("  Saved\\%s", d)
+        end
+    end
+
+    Log.discover("Next: deploy a Campaign Remix mission manually — map loads are "
+        .. "logged, which captures the real mission level names")
     Log.discover("==== discovery dump end ====")
 end
 
