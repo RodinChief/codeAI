@@ -31,7 +31,17 @@ local CANDIDATES = {
         "WBP_FrontEndScreen_C",
         "WBP_TitleScreen_C",
     },
-    -- Per-entry widget classes (the thing we clone).
+    -- Named entry properties on the menu screen (CONFIRMED on-device via the
+    -- F7 TextBlock scan 2026-07-28): each menu row is a named child widget.
+    -- RemixButton is the preferred template (sits where ROGUELIKE goes).
+    entry_props = {
+        "RemixButton",
+        "CampaignMenuButton",
+        "CustomizationButton",
+        "CollectiblesButton",
+        "QuitButton",
+    },
+    -- Per-entry widget classes (fallback template lookup by class).
     menu_entry = {
         "WBP_MainMenuButton_C",
         "WBP_MenuListButton_C",
@@ -45,9 +55,9 @@ local CANDIDATES = {
         "OnClicked",
         "HandleClicked",
     },
-    -- Text-setting: name of the TextBlock inside the entry, if SetText on a
-    -- found TextBlock descendant fails.
-    entry_label_widgets = { "Label", "Text", "ButtonText", "TXT_Label" },
+    -- Text-setting: name of the TextBlock inside the entry. "NameText" is
+    -- CONFIRMED on-device (every menu row labels itself via a NameText child).
+    entry_label_widgets = { "NameText", "Label", "Text", "ButtonText" },
 }
 
 local injected = nil       -- our injected entry widget, once created
@@ -164,22 +174,32 @@ local function attempt()
     end
     if not screen then return false end
 
-    -- Find an existing entry to use as the template.
+    -- Find an existing entry to use as the template. Preferred: the screen's
+    -- own named row widgets (RemixButton etc., confirmed on-device); fallback:
+    -- class-based lookup.
     local template, template_class_name
-    for _, cls in ipairs(CANDIDATES.menu_entry) do
-        template = find_first_valid(cls)
-        if template then
-            template_class_name = full_name(template:GetClass())
-                :gsub("^%S+%s", "") -- strip "WidgetBlueprintGeneratedClass " prefix
-            Log.discover("menuinject: entry template: %s (%s)", cls, template_class_name)
+    for _, prop in ipairs(CANDIDATES.entry_props) do
+        local t = try(function() return screen[prop] end)
+        if t and try(function() return t:IsValid() end) then
+            template = t
+            Log.discover("menuinject: entry template from screen.%s", prop)
             break
         end
     end
     if not template then
-        log_state("screen present but no entry class matched — press F7 for the "
-            .. "TextBlock scan and extend CANDIDATES.menu_entry")
+        for _, cls in ipairs(CANDIDATES.menu_entry) do
+            template = find_first_valid(cls)
+            if template then break end
+        end
+    end
+    if not template then
+        log_state("screen present but no entry template found — press F7 for "
+            .. "the TextBlock scan and extend CANDIDATES.entry_props")
         return false
     end
+    template_class_name = full_name(template:GetClass())
+        :gsub("^%S+%s", "") -- strip "WidgetBlueprintGeneratedClass " prefix
+    Log.discover("menuinject: entry template class: %s", template_class_name)
 
     -- Parent container of the entries (VerticalBox or similar panel).
     local parent = try(function() return template:GetParent() end)
@@ -206,13 +226,19 @@ local function attempt()
         return false
     end
 
-    -- Position: after CAMPAIGN REMIX = index 3 (0-based slot 3). ShiftChild
+    -- Position directly after the template row (Campaign Remix). ShiftChild
     -- exists on some panels at runtime; harmless if absent (entry lands at
     -- the bottom of the list instead).
-    try(function() parent:ShiftChild(3, clone) end)
+    local idx = try(function() return parent:GetChildIndex(template) end)
+    if type(idx) == "number" and idx >= 0 then
+        if not try(function() parent:ShiftChild(idx + 1, clone) return true end) then
+            try(function() parent:ShiftChild(clone, idx + 1) return true end)
+        end
+    end
 
-    set_label(clone, "ROGUELIKE")
     hook_clicks(template_class_name)
+    -- Until the click hook resolves, advertise the working key on the label.
+    set_label(clone, click_hooked and "ROGUELIKE" or "ROGUELIKE  [F6]")
 
     injected = clone
     Log.info("menuinject: ROGUELIKE entry injected into the main menu")
