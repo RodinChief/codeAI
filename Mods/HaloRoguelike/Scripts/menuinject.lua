@@ -75,6 +75,7 @@ local cached_screen, cached_template, cached_parent = nil, nil, nil
 local hover_watch_started = false
 local status_rows = {}     -- extra native rows rendering run state in-menu
 local last_status = nil
+local on_row_click = nil   -- callback when any status row is clicked
 
 -- Log only when the message changes, so the 5s retry loop stays quiet.
 local function log_state(fmt, ...)
@@ -169,16 +170,32 @@ local function hook_clicks(entry_class_name)
             RegisterHook(hook_path,
                 function(Context)
                     local this = Context:get()
-                    if not (injected and this:IsValid()) then return end
+                    if not this:IsValid() then return end
                     -- The clicked object may be an inner CommonButtonBase of
-                    -- our row — match by path prefix, not exact identity.
-                    local inj_path = full_name(injected):gsub("^%S+%s+", "")
+                    -- one of our widgets — match by path prefix.
                     local this_name = full_name(this)
-                    if this_name == inj_path or this_name:find(inj_path, 1, true) then
+                    local function is_ours(widget)
+                        if not widget then return false end
+                        local ok, valid = pcall(function() return widget:IsValid() end)
+                        if not (ok and valid) then return false end
+                        local path = full_name(widget):gsub("^%S+%s+", "")
+                        return this_name == path or this_name:find(path, 1, true) ~= nil
+                    end
+                    if is_ours(injected) then
                         Log.info("menuinject: ROGUELIKE entry clicked")
                         ExecuteInGameThread(function()
                             if on_activate then on_activate() end
                         end)
+                        return
+                    end
+                    for _, row in ipairs(status_rows) do
+                        if is_ours(row) then
+                            Log.info("menuinject: status row clicked")
+                            ExecuteInGameThread(function()
+                                if on_row_click then on_row_click() end
+                            end)
+                            return
+                        end
                     end
                 end)
         end)
@@ -244,8 +261,9 @@ function Menuinject.set_status_lines(lines)
             status_rows[i] = row
         end
         set_label(row, lines[i], true)
-        -- 4 = SelfHitTestInvisible: rendered but not clickable/focusable.
-        try(function() row:SetVisibility(4) end)
+        -- 0 = Visible: rows are clickable — clicking any row acts as the
+        -- primary action (same as F5), so the flow is button-driven.
+        try(function() row:SetVisibility(0) end)
     end
     for i = #lines + 1, #status_rows do
         local row = status_rows[i]
@@ -343,6 +361,11 @@ local function attempt()
     injected = clone
     Log.info("menuinject: ROGUELIKE entry injected into the main menu")
     return click_hooked -- keep retrying label/hook refinement until clicks work
+end
+
+-- Register the status-row click handler (fires like the primary action key).
+function Menuinject.set_row_callback(cb)
+    on_row_click = cb
 end
 
 -- Start polling for the menu. `activate_cb` opens the roguelike panel.

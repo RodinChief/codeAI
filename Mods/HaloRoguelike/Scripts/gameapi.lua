@@ -273,8 +273,13 @@ function Gameapi.apply_nerf_preset()
         Log.warn("gameapi: struct-path write failed; property layout needs discovery")
         return false
     end
-    -- SetDifficultyModifiersEnabled exists (F7 scan) but stays uncalled until
-    -- the SIG dump confirms its parameters — blind calls caused a fatal error.
+    -- Signature confirmed by SIG dump: SetDifficultyModifiersEnabled(bEnabled).
+    local statics = try("find MeteoriteUIStatics", StaticFindObject,
+        "/Script/Meteorite.Default__MeteoriteUIStatics")
+    if statics and statics:IsValid() then
+        local okt = pcall(function() statics:SetDifficultyModifiersEnabled(true) end)
+        Log.info("gameapi: SetDifficultyModifiersEnabled(true) -> %s", tostring(okt))
+    end
     Log.info("gameapi: nerf preset applied (ModifierPreset=%s)",
         Presets.MODIFIER_PRESET_VALUE)
     return true
@@ -312,6 +317,8 @@ local SIG_TARGETS = {
     BPFL_PATH .. ":SelectedDifficulty",
     BPFL_PATH .. ":SelectedInsertionPoint",
     BPFL_PATH .. ":SelectedSkulls",
+    BPFL_PATH .. ":LaunchCampaign",
+    BPFL_PATH .. ":SetClientLobbyInsertionPoint",
     BPFL_PATH .. ":SetClientLobbySkulls",
     BPFL_PATH .. ":SetClientLobbyDifficulty",
     BPFL_PATH .. ":GetRemixSkullsSet",
@@ -350,14 +357,108 @@ function Gameapi.dump_signatures()
     end
 end
 
+-- Classic Halo scenario ids, confirmed plausible by the menu's own
+-- "PlayButton_B30New" (b30 = The Silent Cartographer).
+local SCENARIOS = {
+    pillar_of_autumn = "a10", halo = "a30", truth_and_rec = "a50",
+    silent_cartographer = "b30", assault_ctrl_room = "b40",
+    guilty_spark = "c10", library = "c20", two_betrayals = "c40",
+    keyes = "d20", maw = "d40",
+}
+
+-- Locate the CampaignData asset LaunchCampaignMap wants. Candidates first,
+-- then a substring scan over GUObjectArray (fast; ~50k objects).
+local cached_campaign_data = nil
+function Gameapi.find_campaign_data()
+    if cached_campaign_data
+        and pcall(function() return cached_campaign_data:IsValid() end)
+        and cached_campaign_data:IsValid() then
+        return cached_campaign_data
+    end
+    for _, cls in ipairs({ "CampaignData", "MeteoriteCampaignData",
+        "BlamCampaignData", "CampaignUIInfo" }) do
+        local obj = find_first(cls)
+        if obj then
+            Log.discover("CD resolved via FindFirstOf(%q): %s", cls, full_name(obj))
+            cached_campaign_data = obj
+            return obj
+        end
+    end
+    local found = nil
+    pcall(function()
+        ForEachUObject(function(obj)
+            if found then return end
+            pcall(function()
+                local name = fstr(obj:GetFullName())
+                if name:find("CampaignData", 1, true)
+                    and not name:find("Default__", 1, true)
+                    and not name:find("^Class ")
+                    and not name:find("^Function ") then
+                    Log.discover("CD candidate: %s", name)
+                    found = obj
+                end
+            end)
+        end)
+    end)
+    cached_campaign_data = found
+    return found
+end
+
 function Gameapi.launch_floor(floor, active_skulls)
     Log.info("gameapi: launch request — mission=%s rally=%s difficulty=%s skulls=[%s]",
         floor.mission_id, floor.rally, floor.difficulty,
         table.concat(active_skulls, ","))
-    -- Auto-launch is intentionally disabled until the SIG dump pins the exact
-    -- parameter types (the previous blind-call probing caused a fatal error).
-    Gameapi.dump_signatures()
-    return false, "auto-launch paused: signatures captured to UE4SS.log (SIG lines)"
+
+    local screen = find_first("WBP_MainMenu_C")
+    if not screen then
+        return false, "main menu widget not found (launch only works from the menu)"
+    end
+    local scen = SCENARIOS[floor.mission_id]
+    if not scen then
+        return false, "no scenario id known for mission " .. tostring(floor.mission_id)
+    end
+
+    local diff_index = ({ Easy = 0, Normal = 1, Heroic = 2, Legendary = 3 })
+        [floor.difficulty] or 1
+    local rally_index = ({ Alpha = 0, Bravo = 1, Charlie = 2, Delta = 3 })
+        [floor.rally] or 0
+
+    -- Lobby setup via the game's own helpers (signatures confirmed by SIG dump:
+    -- SetClientLobbyDifficulty(Difficulty, WorldContext)).
+    local bpfl = try("find BPFL_CampaignMenuHelpers", StaticFindObject,
+        BPFL_PATH:gsub("BPFL_CampaignMenuHelpers_C$", "Default__BPFL_CampaignMenuHelpers_C"))
+    if bpfl and bpfl:IsValid() then
+        local okd, errd = pcall(function()
+            bpfl:SetClientLobbyDifficulty(diff_index, screen)
+        end)
+        Log.discover("launch: SetClientLobbyDifficulty(%d) -> %s",
+            diff_index, okd and "OK" or tostring(errd))
+        local has_ip = try("probe SetClientLobbyInsertionPoint", function()
+            return bpfl.SetClientLobbyInsertionPoint ~= nil
+        end)
+        if has_ip then
+            local oki, erri = pcall(function()
+                bpfl:SetClientLobbyInsertionPoint(rally_index, screen)
+            end)
+            Log.discover("launch: SetClientLobbyInsertionPoint(%d) -> %s",
+                rally_index, oki and "OK" or tostring(erri))
+        end
+    end
+
+    local cd = Gameapi.find_campaign_data()
+    if not cd then
+        Gameapi.dump_signatures()
+        return false, "CampaignData asset not found — see CD lines in UE4SS.log"
+    end
+
+    -- The launch itself: LaunchCampaignMap(CampaignData, StartingScenarioName).
+    local ok, err = pcall(function()
+        screen:LaunchCampaignMap(cd, FName(scen))
+    end)
+    Log.discover("launch: LaunchCampaignMap(%s, %q) -> %s",
+        full_name(cd), scen, ok and "OK" or tostring(err))
+    if ok then return true end
+    return false, tostring(err)
 end
 
 -- Continue support discovered in the same scan.

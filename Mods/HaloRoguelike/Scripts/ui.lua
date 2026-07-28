@@ -210,19 +210,19 @@ function Ui.compact_lines()
     local run = State.run
     if Ui.mode == "confirm_new_run" then
         return {
-            "[F5] CONFIRM NEW RUN — save is backed up first",
+            "▶ CLICK / F5: CONFIRM NEW RUN — save is backed up first",
             "achievements likely disabled during the run",
         }
     end
     if not run then
-        return { "[F5] new run  ·  [F6] full panel" }
+        return { "▶ CLICK / F5: START NEW RUN" }
     end
     if run.status ~= State.STATUS.ACTIVE then
         local verdict = run.status == State.STATUS.WON and "RUN WON"
             or run.status == State.STATUS.LOST and "RUN LOST" or "RUN ENDED"
         return {
             string.format("%s · seed %s · %d deaths", verdict, run.seed, run.deaths),
-            "[F5] close run (restores your save)",
+            "▶ CLICK / F5: close run (restores your save)",
         }
     end
     -- Full floor list, roguelike-style: revealed floors show their loadout,
@@ -251,7 +251,7 @@ function Ui.compact_lines()
     if run.floor_status == State.FLOOR.BRIEFING then
         lines[#lines + 1] = "[F5] START FLOOR " .. cur.index
     else
-        lines[#lines + 1] = "Floor in progress · [F5] mark floor complete"
+        lines[#lines + 1] = "Floor in progress · CLICK / F5 = mark complete"
     end
     return lines
 end

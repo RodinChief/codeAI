@@ -240,6 +240,8 @@ local function finish_init(build_ok, build)
     Menuinject.start(function()
         if not Ui.visible then Ui.toggle() end
     end)
+    -- Clicking any of the in-menu status rows = the primary action (F5).
+    Menuinject.set_row_callback(function() primary_action() end)
 
     -- Map-load logging: captures real mission level names when a mission is
     -- deployed (discovery for const.lua and for mission-complete detection —
