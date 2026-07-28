@@ -55,6 +55,18 @@ if [ -f "$UE4SS_DIR/Mods/mods.txt" ] \
     echo "-- added HaloRoguelike to mods.txt"
 fi
 
+# --- UE4SS GUI console (the mod's text UI renders here until the in-game ----
+# --- overlay path is resolved; harmless to leave on) -------------------------
+SETTINGS="$UE4SS_DIR/UE4SS-settings.ini"
+if [ -f "$SETTINGS" ]; then
+    sed -i -E \
+        -e 's/^([[:space:]]*ConsoleEnabled[[:space:]]*=[[:space:]]*).*/\11/' \
+        -e 's/^([[:space:]]*GuiConsoleEnabled[[:space:]]*=[[:space:]]*).*/\11/' \
+        -e 's/^([[:space:]]*GuiConsoleVisible[[:space:]]*=[[:space:]]*).*/\11/' \
+        "$SETTINGS"
+    echo "-- enabled UE4SS GUI console in UE4SS-settings.ini"
+fi
+
 # --- debug menu Game.ini (user config layer wins over the pak'd defaults) ----
 if [ -d "$(dirname "$WINCFG")" ] || [ -d "$PFX" ]; then
     mkdir -p "$WINCFG"
