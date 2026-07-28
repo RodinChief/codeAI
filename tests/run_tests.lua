@@ -232,6 +232,49 @@ for _, mode in ipairs({ "menu", "confirm_new_run", "run", "summary" }) do
     check(ok, "ui: panel_lines mode " .. mode .. " (" .. tostring(err) .. ")")
 end
 
+-- compact_lines drives the in-menu submenu; the ▶/◀ prefixes are the contract
+-- menuinject dispatches on, so every state must expose exactly the right rows.
+local function prefixed(lines, prefix)
+    local n = 0
+    for _, l in ipairs(lines) do
+        if l:sub(1, #prefix) == prefix then n = n + 1 end
+    end
+    return n
+end
+
+Ui.mode = "run" -- finished run (status=won from above): close-run rows
+local cl = Ui.compact_lines()
+check(prefixed(cl, "▶") == 1 and cl[2]:match("CLOSE RUN"),
+    "ui: compact ended-run has one ▶ CLOSE RUN row")
+check(prefixed(cl, "◀") == 1, "ui: compact ended-run has a ◀ BACK row")
+
+State.clear()
+Ui.mode = "menu" -- no run at all
+cl = Ui.compact_lines()
+check(prefixed(cl, "▶") == 1 and cl[1] == "▶ START NEW RUN",
+    "ui: compact no-run offers START NEW RUN")
+Ui.mode = "confirm_new_run"
+cl = Ui.compact_lines()
+check(prefixed(cl, "▶") == 1 and prefixed(cl, "◀") == 1,
+    "ui: compact confirm has YES and BACK rows")
+
+-- Active run: the current floor is the single ▶ row while briefing, and
+-- flips to MARK FLOOR COMPLETE while the mission runs. Locked floors stay fogged.
+State.new_run("HALO-7K2M-QX9", "20260728-000003")
+Ui.mode = "run"
+cl = Ui.compact_lines()
+check(prefixed(cl, "▶") == 1 and cl[2]:match("^▶ FLOOR 1: ") ~= nil,
+    "ui: compact briefing has one ▶ floor row")
+check(table.concat(cl, "\n"):match("FLOOR 3 — LOCKED") ~= nil,
+    "ui: compact locked floors fogged")
+State.on_floor_launched()
+cl = Ui.compact_lines()
+check(prefixed(cl, "▶") == 1
+    and table.concat(cl, "\n"):match("MARK FLOOR COMPLETE") ~= nil,
+    "ui: compact in-mission has one ▶ MARK FLOOR COMPLETE row")
+check(table.concat(cl, "\n"):match("⏳") ~= nil,
+    "ui: compact in-mission floor marked in progress")
+
 -- ------------------------------------------------------------------ done
 os.remove(statefile)
 print = real_print

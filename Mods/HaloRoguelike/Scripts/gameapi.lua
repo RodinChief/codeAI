@@ -445,31 +445,50 @@ function Gameapi.launch_floor(floor, active_skulls)
         end
     end
 
+    -- Preferred path: the menu's own LaunchCampaignMap(CampaignData, Scenario).
     local cd = Gameapi.find_campaign_data()
-    if not cd then
-        Gameapi.dump_signatures()
-        return false, "CampaignData asset not found — see CD lines in UE4SS.log"
+    if cd then
+        local ok, err = pcall(function()
+            screen:LaunchCampaignMap(cd, FName(scen))
+        end)
+        Log.discover("launch: LaunchCampaignMap(%s, %q) -> %s",
+            full_name(cd), scen, ok and "OK" or tostring(err))
+        if ok then return true end
+    else
+        Log.discover("launch: CampaignData asset not found — using direct map travel")
     end
 
-    -- The launch itself: LaunchCampaignMap(CampaignData, StartingScenarioName).
-    local ok, err = pcall(function()
-        screen:LaunchCampaignMap(cd, FName(scen))
-    end)
-    Log.discover("launch: LaunchCampaignMap(%s, %q) -> %s",
-        full_name(cd), scen, ok and "OK" or tostring(err))
-    if ok then return true end
-    return false, tostring(err)
+    -- Fallback: direct level travel. The real mission map path format is
+    -- CONFIRMED from an on-device map-load log line (2026-07-28):
+    --   /Game/Levels/Halo1/Solo/C20/C20  (C20 = The Library)
+    -- This bypasses the campaign lobby (difficulty was already set above via
+    -- SetClientLobbyDifficulty; rally point defaults to mission start).
+    local id = scen:upper()
+    local map = string.format("/Game/Levels/Halo1/Solo/%s/%s", id, id)
+    local gs = try("find GameplayStatics", StaticFindObject,
+        "/Script/Engine.Default__GameplayStatics")
+    if gs and gs:IsValid() then
+        local ok2, err2 = pcall(function()
+            gs:OpenLevel(screen, FName(map), true, "")
+        end)
+        Log.discover("launch: OpenLevel(%q) -> %s", map,
+            ok2 and "OK" or tostring(err2))
+        if ok2 then return true end
+        return false, "OpenLevel failed: " .. tostring(err2)
+    end
+    return false, "no launch path worked (LaunchCampaignMap + OpenLevel both failed)"
 end
 
--- Continue support discovered in the same scan.
+-- Continue support discovered in the same scan. Signature (SIG dump):
+-- ResumeRemixSave(PlayerController).
 function Gameapi.resume_remix_save()
     local statics = try("find MeteoriteUIStatics", StaticFindObject,
         "/Script/Meteorite.Default__MeteoriteUIStatics")
     if not (statics and statics:IsValid()) then return false end
-    return attempt_calls("ResumeRemixSave", {
-        { desc = "()", fn = function() statics:ResumeRemixSave() end },
-        { desc = "(0)", fn = function() statics:ResumeRemixSave(0) end },
-    })
+    local pc = find_first("PlayerController")
+    local ok, err = pcall(function() statics:ResumeRemixSave(pc) end)
+    Log.discover("ResumeRemixSave -> %s", ok and "OK" or tostring(err))
+    return ok
 end
 
 -- ------------------------------------------------------------ discovery

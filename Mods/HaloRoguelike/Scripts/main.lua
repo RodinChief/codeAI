@@ -235,13 +235,39 @@ local function finish_init(build_ok, build)
     Gameapi.on_mission_complete(handle_floor_complete)
     Gameapi.on_player_death(handle_death)
 
-    -- Native "ROGUELIKE" entry in the main-menu list; clicking it opens the
-    -- panel exactly like F6. Purely additive — F6 works regardless.
+    -- Native "ROGUELIKE" entry in the main-menu list. Activating it (click or
+    -- ~1s of gamepad focus) opens the roguelike SUBMENU: the game's own menu
+    -- rows are hidden and replaced by the mod's rows (menuinject). Fires when
+    -- the submenu opens — sync the UI mode to the run state.
     Menuinject.start(function()
-        if not Ui.visible then Ui.toggle() end
+        if State.run and State.run.status ~= State.STATUS.ACTIVE then
+            Ui.mode = "summary"
+        elseif State.run then
+            Ui.mode = "run"
+        else
+            Ui.mode = "menu"
+        end
+        Ui.visible = true
+        Ui.dirty()
     end)
-    -- Clicking any of the in-menu status rows = the primary action (F5).
-    Menuinject.set_row_callback(function() primary_action() end)
+    -- Submenu row activated. "◀" rows go back (menuinject already restored
+    -- the main menu); "▶" rows are the primary action for the current mode:
+    -- start run confirm -> begin run -> launch floor / mark complete -> close.
+    Menuinject.set_row_callback(function(text)
+        if text:sub(1, #"◀") == "◀" then
+            if Ui.mode == "confirm_new_run" then Ui.mode = "menu" end
+            Ui.visible = false
+            Ui.dirty()
+            return
+        end
+        -- The rows shown come from the run state (ui.compact_lines), so make
+        -- the mode agree with it before dispatching — a stale mode would send
+        -- primary_action down the wrong branch.
+        if State.run and Ui.mode ~= "confirm_new_run" then
+            Ui.mode = State.run.status == State.STATUS.ACTIVE and "run" or "summary"
+        end
+        primary_action()
+    end)
 
     -- Map-load logging: captures real mission level names when a mission is
     -- deployed (discovery for const.lua and for mission-complete detection —

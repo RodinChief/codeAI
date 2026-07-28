@@ -1,22 +1,28 @@
--- menuinject.lua — inject a native "ROGUELIKE" entry into the main menu list.
+-- menuinject.lua — a native "ROGUELIKE" entry + submenu inside the main menu.
 --
 -- Approach (the only editor-free way to get a native-looking entry, since
 -- building new UMG assets is ruled out by brief §9): find the shipped
 -- front-end widget at runtime, locate the vertical list of menu entries
--- (RESUME SOLO GAME / CAMPAIGN / CAMPAIGN REMIX / ...), spawn one more
--- instance of the SAME entry widget class the game uses, relabel it
--- "ROGUELIKE", and add it to the same container. Because it is literally the
--- game's own widget class, font/spacing/hover come for free.
+-- (RESUME SOLO GAME / CAMPAIGN / CAMPAIGN REMIX / ...), spawn more instances
+-- of the SAME entry widget class the game uses and add them to the same
+-- container. Because they are literally the game's own widget class,
+-- font/spacing/hover come for free.
 --
--- Every class/property name here is a CANDIDATE until confirmed by a widget
--- dump (docs/DISCOVERY.md step "menu injection"). Until they resolve, this
--- module logs what it found and quietly does nothing — F6 keeps working as
--- the fallback entrance.
+-- SUBMENU model: activating ROGUELIKE collapses the game's own menu rows and
+-- shows the mod's rows in their place — visually a submenu, like CAMPAIGN's
+-- own screen. The "◀ BACK" row restores the original menu. Row text prefixes
+-- carry meaning (set by ui.compact_lines): "▶ " = selectable action,
+-- "◀ " = back, anything else = informational.
 --
--- Click routing: cloned native buttons fire the game's shared click handler,
--- not ours. We hook the entry class's click UFunction and compare instances;
--- when the firing instance is our injected entry we open the roguelike panel
--- and swallow the event.
+-- Activation: cloned rows are NOT part of the menu's MainButtonContainer
+-- button group (confirmed by the F7 UFunction dump — clicks route through
+-- BndEvt__..MainButtonContainer.. delegates), so pressing A on them often
+-- does nothing. Two paths, either works:
+--   1. click hooks on /Script/CommonUI.CommonButtonBase:HandleButtonClicked
+--      and :HandleButtonPressed (fire for mouse/touch clicks);
+--   2. focus dwell: holding gamepad focus (or mouse hover) on an actionable
+--      row for ~1s activates it. Focus detection is confirmed working
+--      on-device, so the Steam Deck always has a pure-controller path.
 
 local Log = require("log")
 
@@ -49,33 +55,38 @@ local CANDIDATES = {
         "WBP_NavButton_C",
     },
     -- Native click handler paths (CONFIRMED via F7 scan: menu buttons are
-    -- CommonUI CommonButtonBase — HandleButtonClicked is the dynamic-delegate
-    -- UFunction every click routes through). Tried first, as full hook paths.
+    -- CommonUI CommonButtonBase). BOTH are hooked — Pressed covers input
+    -- routes where Clicked never fires on out-of-group buttons.
     click_paths = {
         "/Script/CommonUI.CommonButtonBase:HandleButtonClicked",
         "/Script/CommonUI.CommonButtonBase:HandleButtonPressed",
     },
-    -- Fallback: per-class click fns (path built from the entry class).
-    entry_click_fns = {
-        "OnButtonClicked",
-        "HandleButtonClicked",
-        "OnClicked",
-        "HandleClicked",
-    },
-    -- Text-setting: name of the TextBlock inside the entry. "NameText" is
-    -- CONFIRMED on-device (every menu row labels itself via a NameText child).
+    -- Text-setting, in order: SetButtonLabelText is the button's own BP API
+    -- (CONFIRMED in the F7 UFunction dump on WBP_MeteoriteStandaloneButton-
+    -- Default_C); NameText child is the confirmed fallback.
     entry_label_widgets = { "NameText", "Label", "Text", "ButtonText" },
 }
 
-local injected = nil       -- our injected entry widget, once created
-local on_activate = nil    -- callback: open the roguelike panel
+-- Dwell activation: ticks of the 250ms watcher that focus must stay on a row
+-- before it fires. ROGUELIKE opens a submenu (cheap) so it opens faster.
+local DWELL_OPEN_TICKS = 3   -- ~0.75s on the ROGUELIKE entry
+local DWELL_ROW_TICKS  = 4   -- ~1s on a ▶/◀ row
+
+local injected = nil       -- our injected ROGUELIKE entry widget, once created
+local on_activate = nil    -- callback: roguelike submenu was opened
+local on_row_click = nil   -- callback(text): a "▶"/"◀" row was activated
 local click_hooked = false
 local last_log = nil       -- de-spam: repeat log lines are suppressed
+local last_click_log = nil
 local cached_screen, cached_template, cached_parent = nil, nil, nil
-local hover_watch_started = false
-local status_rows = {}     -- extra native rows rendering run state in-menu
+local watcher_started = false
+
+local submenu_open = false
+local status_rows = {}     -- our submenu row widgets
+local row_texts = {}       -- text per row (prefix decides actionability)
+local pending_lines = nil  -- latest lines from ui.compact_lines
 local last_status = nil
-local on_row_click = nil   -- callback when any status row is clicked
+local saved_vis = {}       -- { {widget=w, vis=n}, ... } of hidden game rows
 
 -- Log only when the message changes, so the 5s retry loop stays quiet.
 local function log_state(fmt, ...)
@@ -92,6 +103,10 @@ local function try(fn, ...)
     return nil
 end
 
+local function is_valid(w)
+    return w ~= nil and try(function() return w:IsValid() end) == true
+end
+
 -- FString-safe stringification (plain tostring on UE4SS FStrings yields the
 -- object address, not the text).
 local function fstr(v)
@@ -103,6 +118,10 @@ end
 
 local function full_name(obj)
     return fstr(try(function() return obj:GetFullName() end) or "?")
+end
+
+local function addr(obj)
+    return try(function() return obj:GetAddress() end)
 end
 
 local function find_first_valid(short_class)
@@ -126,8 +145,8 @@ local function make_ftext(text)
     return nil
 end
 
--- Set the entry's label. Tries a SetText API on the entry itself first (many
--- games expose one on their button widget), then named TextBlock children.
+-- Set the entry's label. SetButtonLabelText (the widget's own API) first,
+-- then named TextBlock children.
 local function set_label(entry, text, quiet)
     local ftext = make_ftext(text)
     if not ftext then
@@ -135,6 +154,10 @@ local function set_label(entry, text, quiet)
             Log.discover("menuinject: could not construct FText — no label possible")
         end
         return false
+    end
+    if try(function() entry:SetButtonLabelText(ftext) return true end) then
+        if not quiet then Log.discover("menuinject: label set via SetButtonLabelText") end
+        return true
     end
     if try(function() entry:SetText(ftext) return true end) then
         if not quiet then Log.discover("menuinject: label set via entry:SetText") end
@@ -157,128 +180,254 @@ local function set_label(entry, text, quiet)
     return false
 end
 
--- Hook the click function once per resolved entry class.
-local function hook_clicks(entry_class_name)
-    if click_hooked then return end
-    local paths = {}
-    for _, p in ipairs(CANDIDATES.click_paths) do paths[#paths + 1] = p end
-    for _, fn in ipairs(CANDIDATES.entry_click_fns) do
-        paths[#paths + 1] = string.format("%s:%s", entry_class_name, fn)
+-- ------------------------------------------------------------- submenu
+
+-- Address set of the mod's own widgets (ROGUELIKE entry + rows).
+local function ours_addr_set()
+    local set = {}
+    local a = addr(injected)
+    if a then set[a] = true end
+    for _, row in ipairs(status_rows) do
+        local ra = addr(row)
+        if ra then set[ra] = true end
     end
-    for _, hook_path in ipairs(paths) do
-        local ok = pcall(function()
-            RegisterHook(hook_path,
-                function(Context)
-                    local this = Context:get()
-                    if not this:IsValid() then return end
-                    -- The clicked object may be an inner CommonButtonBase of
-                    -- one of our widgets — match by path prefix.
-                    local this_name = full_name(this)
-                    local function is_ours(widget)
-                        if not widget then return false end
-                        local ok, valid = pcall(function() return widget:IsValid() end)
-                        if not (ok and valid) then return false end
-                        local path = full_name(widget):gsub("^%S+%s+", "")
-                        return this_name == path or this_name:find(path, 1, true) ~= nil
-                    end
-                    if is_ours(injected) then
-                        Log.info("menuinject: ROGUELIKE entry clicked")
-                        ExecuteInGameThread(function()
-                            if on_activate then on_activate() end
-                        end)
-                        return
-                    end
-                    for _, row in ipairs(status_rows) do
-                        if is_ours(row) then
-                            Log.info("menuinject: status row clicked")
-                            ExecuteInGameThread(function()
-                                if on_row_click then on_row_click() end
-                            end)
-                            return
-                        end
-                    end
-                end)
-        end)
-        if ok then
-            click_hooked = true
-            Log.discover("menuinject: click hook on %s", hook_path)
-            return
-        end
-    end
-    Log.discover("menuinject: no click hook resolved for %s — entry will show "
-        .. "but not respond; F6 remains the entrance", entry_class_name)
+    return set
 end
 
--- Hover fallback: while the real click UFunction is unresolved, highlighting
--- the ROGUELIKE row activates it (edge-triggered on hover).
-local hover_was = false
-function start_hover_watcher()
-    if hover_watch_started then return end
-    hover_watch_started = true
+local function apply_pending_rows()
+    if not (submenu_open and pending_lines) then return end
+    if not (is_valid(cached_parent) and is_valid(cached_template)
+        and is_valid(cached_screen)) then return end
+    local lines = pending_lines
+    local blob = table.concat(lines, "\n")
+    if blob == last_status then return end
+    local wbl = try(StaticFindObject, "/Script/UMG.Default__WidgetBlueprintLibrary")
+    local owner = try(function() return cached_template:GetOwningPlayer() end)
+    for i = 1, #lines do
+        local row = status_rows[i]
+        if not is_valid(row) then
+            row = wbl and try(function()
+                return wbl:Create(cached_screen, cached_template:GetClass(), owner)
+            end) or nil
+            if not row then return end
+            try(function() cached_parent:AddChild(row) end)
+            try(function() row:SetIsFocusable(true) end)
+            status_rows[i] = row
+        end
+        set_label(row, lines[i], true)
+        row_texts[i] = lines[i]
+        try(function() row:SetVisibility(0) end) -- 0 = Visible
+    end
+    for i = #lines + 1, #status_rows do
+        local row = status_rows[i]
+        if row then try(function() row:SetVisibility(1) end) end -- 1 = Collapsed
+        row_texts[i] = nil
+    end
+    last_status = blob
+end
+
+-- Open the submenu: collapse every game-owned row in the menu list (saving
+-- its visibility), keep ROGUELIKE as the header, show the mod's rows.
+local function open_submenu()
+    if submenu_open then return end
+    if not (is_valid(cached_parent) and is_valid(injected)) then return end
+    submenu_open = true
+    saved_vis = {}
+    local ours = ours_addr_set()
+    local n = try(function() return cached_parent:GetChildrenCount() end) or 0
+    for i = 0, n - 1 do
+        local ch = try(function() return cached_parent:GetChildAt(i) end)
+        if is_valid(ch) and not ours[addr(ch)] then
+            local vis = try(function() return ch:GetVisibility() end)
+            saved_vis[#saved_vis + 1] = { widget = ch, vis = vis or 0 }
+            try(function() ch:SetVisibility(1) end) -- Collapsed
+        end
+    end
+    last_status = nil -- force row refresh
+    apply_pending_rows()
+    Log.info("menuinject: submenu OPENED (%d game rows hidden, %d mod rows)",
+        #saved_vis, pending_lines and #pending_lines or 0)
+end
+
+local function close_submenu()
+    if not submenu_open then return end
+    submenu_open = false
+    for _, e in ipairs(saved_vis) do
+        if is_valid(e.widget) then
+            try(function() e.widget:SetVisibility(e.vis) end)
+        end
+    end
+    saved_vis = {}
+    for _, row in ipairs(status_rows) do
+        if is_valid(row) then try(function() row:SetVisibility(1) end) end
+    end
+    last_status = nil
+    Log.info("menuinject: submenu CLOSED (main menu restored)")
+end
+
+-- Full reset when the menu widget got destroyed (e.g. a mission loaded).
+local function reset_all()
+    injected = nil
+    cached_screen, cached_template, cached_parent = nil, nil, nil
+    status_rows, row_texts = {}, {}
+    saved_vis = {}
+    submenu_open = false
+    last_status = nil
+end
+
+-- ------------------------------------------------------------- activation
+
+local function activate_open()
+    ExecuteInGameThread(function()
+        open_submenu()
+        if on_activate then on_activate() end
+    end)
+end
+
+local function activate_row(i)
+    local text = row_texts[i]
+    if not text then return end
+    local first = text:sub(1, #"▶")
+    if first ~= "▶" and first ~= "◀" then return end -- informational row
+    Log.info("menuinject: row activated: %s", text)
+    ExecuteInGameThread(function()
+        if first == "◀" then close_submenu() end
+        if on_row_click then on_row_click(text) end
+    end)
+end
+
+-- widget -> which of ours it is: "entry" | row index | nil.
+local function classify(this_name)
+    local function matches(widget)
+        if not is_valid(widget) then return false end
+        local path = full_name(widget):gsub("^%S+%s+", "")
+        return this_name == path or this_name:find(path, 1, true) ~= nil
+    end
+    if matches(injected) then return "entry" end
+    for i, row in ipairs(status_rows) do
+        if row_texts[i] and matches(row) then return i end
+    end
+    return nil
+end
+
+-- Hook the click functions once. Every observed click is logged (de-duped)
+-- so on-device logs show whether clicks reach cloned widgets at all.
+local function hook_clicks()
+    if click_hooked then return end
+    local any = false
+    for _, hook_path in ipairs(CANDIDATES.click_paths) do
+        local ok = pcall(function()
+            RegisterHook(hook_path, function(Context)
+                local this = Context:get()
+                if not this:IsValid() then return end
+                local this_name = full_name(this)
+                if this_name ~= last_click_log then
+                    Log.discover("menuinject: click seen on %s", this_name)
+                    last_click_log = this_name
+                end
+                local what = classify(this_name)
+                if what == "entry" then
+                    Log.info("menuinject: ROGUELIKE entry clicked")
+                    activate_open()
+                elseif type(what) == "number" then
+                    activate_row(what)
+                end
+            end)
+        end)
+        if ok then
+            any = true
+            Log.discover("menuinject: click hook on %s", hook_path)
+        end
+    end
+    click_hooked = any
+    if not any then
+        Log.discover("menuinject: no click hook resolved — focus dwell is the "
+            .. "only activation path")
+    end
+end
+
+-- Focus/hover watcher: the activation path that is CONFIRMED working on the
+-- Steam Deck. Holding focus (gamepad) or hover (mouse) on the ROGUELIKE entry
+-- or on a ▶/◀ row for the dwell time activates it.
+local function focused(widget)
+    return try(function() return widget:IsHovered() end)
+        or try(function() return widget:HasKeyboardFocus() end)
+        or try(function() return widget:HasFocusedDescendants() end)
+end
+
+local dwell_target, dwell_ticks, dwell_fired = nil, 0, false
+local function start_watcher()
+    if watcher_started then return end
+    watcher_started = true
     pcall(function()
         LoopAsync(250, function()
-            if not injected or not try(function() return injected:IsValid() end) then
-                hover_watch_started = false
-                return true
+            if not is_valid(injected) then
+                watcher_started = false
+                reset_all()
+                return true -- attempt loop re-injects on the next pass
             end
-            -- Gamepad menus use focus, not mouse hover — check both.
-            local hovered = try(function() return injected:IsHovered() end)
-                or try(function() return injected:HasKeyboardFocus() end)
-                or try(function() return injected:HasFocusedDescendants() end)
-            if hovered and not hover_was then
-                hover_was = true
-                Log.info("menuinject: ROGUELIKE entry hovered — activating")
-                ExecuteInGameThread(function()
-                    if on_activate then on_activate() end
-                end)
-            elseif not hovered then
-                hover_was = false
+            -- Which of our widgets has focus right now?
+            local target = nil
+            if focused(injected) then
+                target = "entry"
+            elseif submenu_open then
+                for i, row in ipairs(status_rows) do
+                    if row_texts[i] and is_valid(row) and focused(row) then
+                        target = i
+                        break
+                    end
+                end
+            end
+            if target ~= dwell_target then
+                dwell_target, dwell_ticks, dwell_fired = target, 0, false
+            elseif target ~= nil and not dwell_fired then
+                dwell_ticks = dwell_ticks + 1
+                local need = (target == "entry") and DWELL_OPEN_TICKS
+                    or DWELL_ROW_TICKS
+                if dwell_ticks >= need then
+                    dwell_fired = true
+                    if target == "entry" then
+                        if not submenu_open then
+                            Log.info("menuinject: ROGUELIKE focused — opening submenu")
+                            activate_open()
+                        end
+                    else
+                        activate_row(target)
+                    end
+                end
             end
             return false
         end)
     end)
 end
 
--- In-menu status rows: native rows under the menu list mirroring the run
--- state (seed, floor, skulls, next action) so the mode is visible in-game.
--- Rows are the same button widget class, made non-interactive.
+-- ------------------------------------------------------------- API
+
+-- Called every second by main.lua with ui.compact_lines(). Rows only render
+-- while the submenu is open; otherwise the lines are stored for later.
 function Menuinject.set_status_lines(lines)
-    if not cached_parent or not cached_template or not cached_screen then
-        return false
-    end
-    local blob = table.concat(lines, "\n")
-    if blob == last_status then return true end
-    local wbl = try(StaticFindObject, "/Script/UMG.Default__WidgetBlueprintLibrary")
-    local owner = try(function() return cached_template:GetOwningPlayer() end)
-    for i = 1, #lines do
-        local row = status_rows[i]
-        if not (row and try(function() return row:IsValid() end)) then
-            row = wbl and try(function()
-                return wbl:Create(cached_screen, cached_template:GetClass(), owner)
-            end) or nil
-            if not row then return false end
-            try(function() cached_parent:AddChild(row) end)
-            status_rows[i] = row
-        end
-        set_label(row, lines[i], true)
-        -- 0 = Visible: rows are clickable — clicking any row acts as the
-        -- primary action (same as F5), so the flow is button-driven.
-        try(function() row:SetVisibility(0) end)
-    end
-    for i = #lines + 1, #status_rows do
-        local row = status_rows[i]
-        if row then try(function() row:SetVisibility(1) end) end -- 1 = Collapsed
-    end
-    last_status = blob
-    return true
+    pending_lines = lines
+    apply_pending_rows()
+    return submenu_open
+end
+
+-- Register the ▶/◀ row activation handler: cb(row_text).
+function Menuinject.set_row_callback(cb)
+    on_row_click = cb
+end
+
+function Menuinject.is_open()
+    return submenu_open
+end
+
+function Menuinject.close()
+    close_submenu()
 end
 
 -- One injection attempt. Returns true when done (stops the retry loop).
 local function attempt()
-    if injected and try(function() return injected:IsValid() end) then
-        return true
-    end
-    injected = nil
+    if is_valid(injected) then return true end
+    reset_all()
 
     local screen
     for _, cls in ipairs(CANDIDATES.menu_screen) do
@@ -293,10 +442,10 @@ local function attempt()
     -- Find an existing entry to use as the template. Preferred: the screen's
     -- own named row widgets (RemixButton etc., confirmed on-device); fallback:
     -- class-based lookup.
-    local template, template_class_name
+    local template
     for _, prop in ipairs(CANDIDATES.entry_props) do
         local t = try(function() return screen[prop] end)
-        if t and try(function() return t:IsValid() end) then
+        if is_valid(t) then
             template = t
             Log.discover("menuinject: entry template from screen.%s", prop)
             break
@@ -313,13 +462,12 @@ local function attempt()
             .. "the TextBlock scan and extend CANDIDATES.entry_props")
         return false
     end
-    template_class_name = full_name(template:GetClass())
-        :gsub("^%S+%s", "") -- strip "WidgetBlueprintGeneratedClass " prefix
-    Log.discover("menuinject: entry template class: %s", template_class_name)
+    Log.discover("menuinject: entry template class: %s",
+        full_name(template:GetClass()):gsub("^%S+%s", ""))
 
     -- Parent container of the entries (VerticalBox or similar panel).
     local parent = try(function() return template:GetParent() end)
-    if not parent or not parent:IsValid() then
+    if not is_valid(parent) then
         Log.discover("menuinject: template has no reachable parent panel")
         return false
     end
@@ -330,7 +478,7 @@ local function attempt()
     local clone = wbl and try(function()
         return wbl:Create(screen, template:GetClass(), owner)
     end) or nil
-    if not clone or not clone:IsValid() then
+    if not is_valid(clone) then
         Log.discover("menuinject: WidgetBlueprintLibrary.Create failed")
         return false
     end
@@ -352,38 +500,29 @@ local function attempt()
         end
     end
 
-    hook_clicks(template_class_name)
+    hook_clicks()
     set_label(clone, "ROGUELIKE")
+    try(function() clone:SetIsFocusable(true) end)
     try(function() clone:SetVisibility(0) end) -- 0 = ESlateVisibility::Visible
     cached_screen, cached_template, cached_parent = screen, template, parent
-    start_hover_watcher()
 
     injected = clone
+    start_watcher()
     Log.info("menuinject: ROGUELIKE entry injected into the main menu")
-    return click_hooked -- keep retrying label/hook refinement until clicks work
+    return true
 end
 
--- Register the status-row click handler (fires like the primary action key).
-function Menuinject.set_row_callback(cb)
-    on_row_click = cb
-end
-
--- Start polling for the menu. `activate_cb` opens the roguelike panel.
+-- Start polling for the menu. `activate_cb` fires when the submenu opens.
 function Menuinject.start(activate_cb)
     on_activate = activate_cb
     local tries = 0
     local ok = pcall(function()
         LoopAsync(5000, function()
             tries = tries + 1
-            local done = try(attempt) or false
+            try(attempt)
             -- Menus get recreated (e.g. returning from a mission), so never
-            -- fully stop; back off to a slow re-check once resolved.
-            if tries > 150 and not injected then
-                Log.discover("menuinject: giving up after %d attempts — see "
-                    .. "docs/DISCOVERY.md (menu injection); F6 overlay unaffected",
-                    tries)
-                return true
-            end
+            -- fully stop; the attempt() guard makes re-checks cheap.
+            if tries > 720 then return true end -- give up after ~1h
             return false
         end)
     end)

@@ -159,21 +159,21 @@ function Ui.panel_lines(capability_status)
     if Ui.notice then add("‼ " .. Ui.notice) end
 
     if Ui.mode == "menu" then
-        add("  [" .. k.primary_action .. "] New run"
-            .. (State.run and State.run.status == State.STATUS.ACTIVE
-                and "   (a run is in progress — resumes instead)" or ""))
+        add("  ▶ Select ROGUELIKE in the main menu to "
+            .. ((State.run and State.run.status == State.STATUS.ACTIVE)
+                and "resume the run" or "start a new run"))
         if State.run and State.run.status == State.STATUS.ACTIVE then
             add(string.format("  Resume: floor %d/%d, seed %s",
                 State.run.current_floor, Const.FLOORS_PER_RUN, State.run.seed))
         end
-        add("  [" .. k.exit_mode .. "] Exit mode (restore save)")
+        add("  Exit mode (restore save): " .. k.exit_mode .. " key")
     elseif Ui.mode == "confirm_new_run" then
         add("  STARTING A RUN WILL:")
         add("   • back up, then OVERWRITE your solo campaign save (New Game)")
         add("   • very likely DISABLE ACHIEVEMENTS while modifiers are active")
         add("  Your save is restored and modifiers cleared when you exit the mode.")
-        add("  [" .. k.primary_action .. "] I understand — start the run")
-        add("  [" .. k.toggle_overlay .. "] Cancel")
+        add("  ▶ Confirm with the YES row in the ROGUELIKE menu")
+        add("  ◀ Cancel with the NO row (or the " .. k.toggle_overlay .. " key)")
     elseif Ui.mode == "run" and State.run then
         local run = State.run
         add("  Seed: " .. run.seed .. "   " .. (Ui.corner_counter() or ""))
@@ -185,11 +185,11 @@ function Ui.panel_lines(capability_status)
         add("  Active skulls:")
         for _, l in ipairs(Ui.active_skull_lines()) do add(l) end
         if run.floor_status == State.FLOOR.BRIEFING then
-            add("  [" .. k.primary_action .. "] START FLOOR "
-                .. run.current_floor)
+            add("  ▶ Select the FLOOR " .. run.current_floor
+                .. " row in the ROGUELIKE menu to launch it")
         else
-            add("  Floor in progress. [" .. k.primary_action
-                .. "] mark floor complete (manual fallback)")
+            add("  Floor in progress — select MARK FLOOR COMPLETE in the")
+            add("  ROGUELIKE menu after beating the mission")
         end
         if capability_status and not capability_status.mission_launch then
             add("  (launch call unresolved: start the mission manually with the")
@@ -197,48 +197,60 @@ function Ui.panel_lines(capability_status)
         end
     elseif Ui.mode == "summary" then
         for _, l in ipairs(Ui.summary_lines()) do add(l) end
-        add("  [" .. k.primary_action .. "] Done (restore save & clear run)")
+        add("  ▶ Select CLOSE RUN in the ROGUELIKE menu (restores save)")
     end
 
     add("╚══════════════════════════════════════")
     return lines
 end
 
--- Compact lines for the in-menu native status rows (menuinject). Short lines
--- only — the menu row widget clips long text.
+-- Compact lines for the in-menu roguelike SUBMENU (menuinject). Row prefixes
+-- carry meaning: "▶ " rows are selectable actions, "◀ " rows go back, plain
+-- rows are informational. menuinject activates ▶/◀ rows on click OR on
+-- holding gamepad focus on them (~1s), so no keyboard is ever required.
+-- Short lines only — the menu row widget clips long text.
 function Ui.compact_lines()
     local run = State.run
     if Ui.mode == "confirm_new_run" then
         return {
-            "▶ CLICK / F5: CONFIRM NEW RUN — save is backed up first",
-            "achievements likely disabled during the run",
+            "START RUN? Save is backed up first, then overwritten",
+            "Achievements likely OFF until you exit the mode",
+            "▶ YES — START THE RUN",
+            "◀ NO — BACK",
         }
     end
     if not run then
-        return { "▶ CLICK / F5: START NEW RUN" }
+        return { "▶ START NEW RUN", "◀ BACK" }
     end
     if run.status ~= State.STATUS.ACTIVE then
         local verdict = run.status == State.STATUS.WON and "RUN WON"
             or run.status == State.STATUS.LOST and "RUN LOST" or "RUN ENDED"
         return {
             string.format("%s · seed %s · %d deaths", verdict, run.seed, run.deaths),
-            "▶ CLICK / F5: close run (restores your save)",
+            "▶ CLOSE RUN — RESTORE MY CAMPAIGN SAVE",
+            "◀ BACK",
         }
     end
     -- Full floor list, roguelike-style: revealed floors show their loadout,
-    -- future floors show as [LOCKED].
+    -- future floors show as LOCKED. The CURRENT floor is the selectable row:
+    -- selecting it launches the mission (or marks it complete mid-mission).
     local lines = {
         string.format("%s  ·  %s", run.seed, Ui.corner_counter() or ""),
     }
+    local in_mission = run.floor_status ~= State.FLOOR.BRIEFING
     for i = 1, Const.FLOORS_PER_RUN do
         local fl = run.floors[i]
         if i > run.current_floor then
-            lines[#lines + 1] = string.format("FLOOR %d  [LOCKED]", i)
+            lines[#lines + 1] = string.format("FLOOR %d — LOCKED", i)
         elseif i < run.current_floor then
-            lines[#lines + 1] = string.format("FLOOR %d  ✓ %s", i,
+            lines[#lines + 1] = string.format("FLOOR %d ✓ %s", i,
                 mission_by_id(fl.mission_id).name)
+        elseif in_mission then
+            lines[#lines + 1] = string.format("FLOOR %d ⏳ %s @ Rally %s · %s%s", i,
+                mission_by_id(fl.mission_id).name, fl.rally,
+                fl.difficulty, fl.nerf and " +" or "")
         else
-            lines[#lines + 1] = string.format("FLOOR %d ▶ %s @ Rally %s · %s%s", i,
+            lines[#lines + 1] = string.format("▶ FLOOR %d: %s @ Rally %s · %s%s", i,
                 mission_by_id(fl.mission_id).name, fl.rally,
                 fl.difficulty, fl.nerf and " +" or "")
         end
@@ -248,11 +260,10 @@ function Ui.compact_lines()
     for _, id in ipairs(cur.new_skulls) do names[#names + 1] = skull_by_id(id).name end
     lines[#lines + 1] = string.format("New skulls: %s · Vis: %s",
         table.concat(names, ", "), vis_by_id(cur.visibility).name)
-    if run.floor_status == State.FLOOR.BRIEFING then
-        lines[#lines + 1] = "[F5] START FLOOR " .. cur.index
-    else
-        lines[#lines + 1] = "Floor in progress · CLICK / F5 = mark complete"
+    if in_mission then
+        lines[#lines + 1] = "▶ MARK FLOOR COMPLETE (after beating the mission)"
     end
+    lines[#lines + 1] = "◀ BACK"
     return lines
 end
 
