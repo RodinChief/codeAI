@@ -12,6 +12,7 @@ local State     = require("state")
 local Saveguard = require("saveguard")
 local Gameapi   = require("gameapi")
 local Ui        = require("ui")
+local Menuinject = require("menuinject")
 
 Log.info("=======================================================")
 Log.info("Halo: Campaign Evolved — Roguelike mod loading")
@@ -233,6 +234,12 @@ local function finish_init(build_ok, build)
     Gameapi.resolve()
     Gameapi.on_mission_complete(handle_floor_complete)
     Gameapi.on_player_death(handle_death)
+
+    -- Native "ROGUELIKE" entry in the main-menu list; clicking it opens the
+    -- panel exactly like F6. Purely additive — F6 works regardless.
+    Menuinject.start(function()
+        if not Ui.visible then Ui.toggle() end
+    end)
 
     if State.load() and State.run.status == State.STATUS.ACTIVE then
         Log.info("main: resumable run found (seed %s, floor %d)",

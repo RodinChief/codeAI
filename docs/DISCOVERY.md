@@ -89,6 +89,36 @@ card's rally point and difficulty with Iron active, and `UE4SS.log` shows
 - finish the mission → `state: floor 1 complete`, floor 2 card revealed;
 - restart the game mid-run → run resumes at the same floor (briefing state).
 
+## Menu injection (native "ROGUELIKE" entry)
+
+`Scripts/menuinject.lua` clones one of the game's own main-menu entry widgets
+at runtime and relabels it ROGUELIKE — native look without building UMG
+assets. It needs three names confirmed from a **widget dump taken while the
+main menu is on screen**:
+
+```bash
+grep -iE 'WBP_.*(MainMenu|FrontEnd|Title)' ObjectDump.txt      # screen widget
+grep -iE 'WBP_.*(Button|Entry|Nav)' ObjectDump.txt             # entry widget
+```
+
+| Needed | Where it goes in `menuinject.lua` |
+|---|---|
+| Menu screen widget class | `CANDIDATES.menu_screen` |
+| Menu entry widget class (the buttons in the list) | `CANDIDATES.menu_entry` |
+| The entry's click UFunction | `CANDIDATES.entry_click_fns` |
+| The entry's TextBlock child name | `CANDIDATES.entry_label_widgets` |
+
+The module logs each stage (`grep 'menuinject' UE4SS.log`): screen found →
+template found → clone added → label set → click hooked. Whatever stage it
+stops at tells you which candidate list to extend. Until everything resolves
+it does nothing visible and F6 stays the entrance.
+
+Known limits: the entry may land at the bottom of the list instead of after
+CAMPAIGN REMIX if the panel class has no runtime `ShiftChild`; controller
+focus/navigation order is owned by the game's own focus system and may skip
+the injected entry (mouse/touch click still works) — fixing that needs the
+focus-handling function, same discovery method.
+
 ## Hook-writing notes
 
 - Register hooks with `RegisterHook("/Script/Module.Class:Function", fn)`;
