@@ -225,19 +225,31 @@ function Ui.compact_lines()
             "[F5] close run (restores your save)",
         }
     end
-    local fl = run.floors[run.current_floor]
-    local names = {}
-    for _, id in ipairs(fl.new_skulls) do names[#names + 1] = skull_by_id(id).name end
+    -- Full floor list, roguelike-style: revealed floors show their loadout,
+    -- future floors show as [LOCKED].
     local lines = {
         string.format("%s  ·  %s", run.seed, Ui.corner_counter() or ""),
-        string.format("Floor %d: %s @ Rally %s · %s%s", fl.index,
-            mission_by_id(fl.mission_id).name, fl.rally,
-            fl.difficulty, fl.nerf and " +" or ""),
-        string.format("New skulls: %s · Vis: %s",
-            table.concat(names, ", "), vis_by_id(fl.visibility).name),
     }
+    for i = 1, Const.FLOORS_PER_RUN do
+        local fl = run.floors[i]
+        if i > run.current_floor then
+            lines[#lines + 1] = string.format("FLOOR %d  [LOCKED]", i)
+        elseif i < run.current_floor then
+            lines[#lines + 1] = string.format("FLOOR %d  ✓ %s", i,
+                mission_by_id(fl.mission_id).name)
+        else
+            lines[#lines + 1] = string.format("FLOOR %d ▶ %s @ Rally %s · %s%s", i,
+                mission_by_id(fl.mission_id).name, fl.rally,
+                fl.difficulty, fl.nerf and " +" or "")
+        end
+    end
+    local cur = run.floors[run.current_floor]
+    local names = {}
+    for _, id in ipairs(cur.new_skulls) do names[#names + 1] = skull_by_id(id).name end
+    lines[#lines + 1] = string.format("New skulls: %s · Vis: %s",
+        table.concat(names, ", "), vis_by_id(cur.visibility).name)
     if run.floor_status == State.FLOOR.BRIEFING then
-        lines[#lines + 1] = "[F5] START FLOOR " .. fl.index
+        lines[#lines + 1] = "[F5] START FLOOR " .. cur.index
     else
         lines[#lines + 1] = "Floor in progress · [F5] mark floor complete"
     end

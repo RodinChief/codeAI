@@ -189,7 +189,10 @@ function start_hover_watcher()
                 hover_watch_started = false
                 return true
             end
+            -- Gamepad menus use focus, not mouse hover — check both.
             local hovered = try(function() return injected:IsHovered() end)
+                or try(function() return injected:HasKeyboardFocus() end)
+                or try(function() return injected:HasFocusedDescendants() end)
             if hovered and not hover_was then
                 hover_was = true
                 Log.info("menuinject: ROGUELIKE entry hovered — activating")
