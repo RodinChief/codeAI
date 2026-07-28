@@ -273,6 +273,13 @@ function Gameapi.apply_nerf_preset()
         Log.warn("gameapi: struct-path write failed; property layout needs discovery")
         return false
     end
+    -- Discovered toggle (F7 scan): the game gates modifiers behind this.
+    local statics = try("find MeteoriteUIStatics", StaticFindObject,
+        "/Script/Meteorite.Default__MeteoriteUIStatics")
+    if statics and statics:IsValid() then
+        local okt = pcall(function() statics:SetDifficultyModifiersEnabled(true) end)
+        Log.info("gameapi: SetDifficultyModifiersEnabled(true) -> %s", tostring(okt))
+    end
     Log.info("gameapi: nerf preset applied (ModifierPreset=%s)",
         Presets.MODIFIER_PRESET_VALUE)
     return true
@@ -285,39 +292,95 @@ function Gameapi.clear_modifiers()
     if not us then return false end
     local ok = pcall(function() us.ModifierPreset = "None" end)
     Log.info("gameapi: ModifierPreset=None -> %s", ok and "ok" or "FAILED")
+    local statics = try("find MeteoriteUIStatics", StaticFindObject,
+        "/Script/Meteorite.Default__MeteoriteUIStatics")
+    if statics and statics:IsValid() then
+        pcall(function() statics:SetDifficultyModifiersEnabled(false) end)
+    end
     return ok
 end
 
 -- ------------------------------------------------------------ launch
 
--- Launch a floor: mission + rally point + difficulty + skull set, on the
--- Campaign Remix deploy path. THE core unknown (§7.1). Until the launch call
--- is resolved this logs exactly what it would have done and returns false so
--- the UI can tell the player to launch manually (mission/rally/difficulty
--- are shown on the floor card; skull set via the debug menu, brief §6.1).
+-- Launch a floor: mission + rally point + difficulty + skull set.
+-- CONFIRMED by the F7 UFunction scan (2026-07-28): the game's own menu flow is
+--   BPFL_CampaignMenuHelpers_C: SelectedDifficulty / SelectedInsertionPoint /
+--     SetClientLobbySkulls / GetRemixSkullsSet ...
+--   WBP_MainMenu_C:LaunchCampaignMap
+-- Signatures are still unknown, so every call is attempted through pcall with
+-- several arg shapes and the engine's own error text is logged verbatim —
+-- those errors state the expected parameter count/types, which is exactly the
+-- data needed to finalize the shapes.
+local BPFL_PATH = "/Game/UI/Frontend/CampaignMenu/Data/BPFL_CampaignMenuHelpers."
+    .. "Default__BPFL_CampaignMenuHelpers_C"
+
+local function attempt_calls(label, variants)
+    for _, v in ipairs(variants) do
+        local ok, err = pcall(v.fn)
+        Log.discover("launch attempt %s %s -> %s", label, v.desc,
+            ok and "OK" or ("ERR: " .. tostring(err)))
+        if ok then return true end
+    end
+    return false
+end
+
 function Gameapi.launch_floor(floor, active_skulls)
     Log.info("gameapi: launch request — mission=%s rally=%s difficulty=%s skulls=[%s]",
         floor.mission_id, floor.rally, floor.difficulty,
         table.concat(active_skulls, ","))
 
-    if not R.mission_launcher then Gameapi.resolve() end
-    if not R.mission_launcher then
-        Log.warn("gameapi: launch UNRESOLVED — falling back to manual launch. "
-            .. "The floor card shows what to pick; use the debug menu (G) for skulls.")
-        return false, "launch call not yet resolved (see UE4SS.log / docs/DISCOVERY.md)"
+    local screen = find_first("WBP_MainMenu_C")
+    if not screen then
+        return false, "main menu widget not found (launch only works from the menu)"
     end
 
-    local ok, err = pcall(function()
-        -- Signature is provisional; adjust after discovery. Logged verbatim so
-        -- a failed call still documents the attempted shape.
-        R.mission_launcher[R.mission_launch_fn](R.mission_launcher,
-            floor.mission_id, floor.rally, floor.difficulty)
-    end)
-    if not ok then
-        Log.error("gameapi: launch call failed: %s", tostring(err))
-        return false, tostring(err)
+    -- Difficulty index: Easy=0 Normal=1 Heroic=2 Legendary=3 (standard order).
+    local diff_index = ({ Easy = 0, Normal = 1, Heroic = 2, Legendary = 3 })
+        [floor.difficulty] or 1
+    local rally_index = ({ Alpha = 0, Bravo = 1, Charlie = 2, Delta = 3 })
+        [floor.rally] or 0
+
+    local bpfl = try("find BPFL_CampaignMenuHelpers", StaticFindObject, BPFL_PATH)
+    if bpfl and bpfl:IsValid() then
+        attempt_calls("SelectedDifficulty", {
+            { desc = "(int)", fn = function() bpfl:SelectedDifficulty(diff_index) end },
+            { desc = "(string)", fn = function() bpfl:SelectedDifficulty(floor.difficulty) end },
+        })
+        attempt_calls("SelectedInsertionPoint", {
+            { desc = "(int)", fn = function() bpfl:SelectedInsertionPoint(rally_index) end },
+        })
+        attempt_calls("SetClientLobbySkulls(remix set)", {
+            { desc = "(GetRemixSkullsSet())", fn = function()
+                bpfl:SetClientLobbySkulls(bpfl:GetRemixSkullsSet())
+            end },
+        })
+    else
+        Log.discover("launch: BPFL_CampaignMenuHelpers CDO not found at %s", BPFL_PATH)
     end
-    return true
+
+    local launched = attempt_calls("LaunchCampaignMap", {
+        { desc = "()", fn = function() screen:LaunchCampaignMap() end },
+        { desc = "(mission)", fn = function()
+            screen:LaunchCampaignMap(FName and FName(floor.mission_id) or floor.mission_id)
+        end },
+        { desc = "(mission,int)", fn = function()
+            screen:LaunchCampaignMap(FName and FName(floor.mission_id)
+                or floor.mission_id, rally_index)
+        end },
+    })
+    if launched then return true end
+    return false, "LaunchCampaignMap signature mismatch — see 'launch attempt' log lines"
+end
+
+-- Continue support discovered in the same scan.
+function Gameapi.resume_remix_save()
+    local statics = try("find MeteoriteUIStatics", StaticFindObject,
+        "/Script/Meteorite.Default__MeteoriteUIStatics")
+    if not (statics and statics:IsValid()) then return false end
+    return attempt_calls("ResumeRemixSave", {
+        { desc = "()", fn = function() statics:ResumeRemixSave() end },
+        { desc = "(0)", fn = function() statics:ResumeRemixSave(0) end },
+    })
 end
 
 -- ------------------------------------------------------------ discovery
@@ -383,7 +446,8 @@ function Gameapi.discovery_dump()
         local fc_addr = func_class:GetAddress()
         local pats = { "StandaloneButton", "MainMenu", "Skull", "Insertion",
             "Remix", "Deploy", "StartMission", "LaunchMission", "StartCampaign",
-            "RallyPoint", "Difficulty", "ModifierPreset" }
+            "RallyPoint", "Difficulty", "ModifierPreset",
+            "Cinematic", "Cutscene", "SkipCinematic", "LaunchCampaign" }
         local total, funcs, matched = 0, 0, {}
         local ok_scan = pcall(function()
             ForEachUObject(function(obj)

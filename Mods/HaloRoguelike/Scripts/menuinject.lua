@@ -48,7 +48,14 @@ local CANDIDATES = {
         "WBP_FrontEndButton_C",
         "WBP_NavButton_C",
     },
-    -- Click handler UFunctions on the entry class (hooked, instance-compared).
+    -- Native click handler paths (CONFIRMED via F7 scan: menu buttons are
+    -- CommonUI CommonButtonBase — HandleButtonClicked is the dynamic-delegate
+    -- UFunction every click routes through). Tried first, as full hook paths.
+    click_paths = {
+        "/Script/CommonUI.CommonButtonBase:HandleButtonClicked",
+        "/Script/CommonUI.CommonButtonBase:HandleButtonPressed",
+    },
+    -- Fallback: per-class click fns (path built from the entry class).
     entry_click_fns = {
         "OnButtonClicked",
         "HandleButtonClicked",
@@ -152,15 +159,23 @@ end
 -- Hook the click function once per resolved entry class.
 local function hook_clicks(entry_class_name)
     if click_hooked then return end
+    local paths = {}
+    for _, p in ipairs(CANDIDATES.click_paths) do paths[#paths + 1] = p end
     for _, fn in ipairs(CANDIDATES.entry_click_fns) do
-        -- Hook path needs the full class path; derive it from the instance.
+        paths[#paths + 1] = string.format("%s:%s", entry_class_name, fn)
+    end
+    for _, hook_path in ipairs(paths) do
         local ok = pcall(function()
-            RegisterHook(string.format("%s:%s", entry_class_name, fn),
+            RegisterHook(hook_path,
                 function(Context)
                     local this = Context:get()
-                    if injected and this:IsValid()
-                        and full_name(this) == full_name(injected) then
-                        Log.info("menuinject: ROGUELIKE entry activated")
+                    if not (injected and this:IsValid()) then return end
+                    -- The clicked object may be an inner CommonButtonBase of
+                    -- our row — match by path prefix, not exact identity.
+                    local inj_path = full_name(injected):gsub("^%S+%s+", "")
+                    local this_name = full_name(this)
+                    if this_name == inj_path or this_name:find(inj_path, 1, true) then
+                        Log.info("menuinject: ROGUELIKE entry clicked")
                         ExecuteInGameThread(function()
                             if on_activate then on_activate() end
                         end)
@@ -169,7 +184,7 @@ local function hook_clicks(entry_class_name)
         end)
         if ok then
             click_hooked = true
-            Log.discover("menuinject: click hook on %s:%s", entry_class_name, fn)
+            Log.discover("menuinject: click hook on %s", hook_path)
             return
         end
     end
