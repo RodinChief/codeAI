@@ -102,13 +102,25 @@ local function find_first_valid(short_class)
     return nil
 end
 
+-- Build an FText. UE4SS >= 3.0 has a global FText() constructor; fall back to
+-- KismetTextLibrary (Engine module — NOT UMG, that lookup silently fails).
+local function make_ftext(text)
+    local ok, ft = pcall(function() return FText(text) end)
+    if ok and ft then return ft end
+    local ktl = try(StaticFindObject, "/Script/Engine.Default__KismetTextLibrary")
+    if ktl and ktl:IsValid() then
+        return try(function() return ktl:Conv_StringToText(text) end)
+    end
+    return nil
+end
+
 -- Set the entry's label. Tries a SetText API on the entry itself first (many
 -- games expose one on their button widget), then named TextBlock children.
 local function set_label(entry, text)
-    local ftext = nil
-    local ktl = try(StaticFindObject, "/Script/UMG.Default__KismetTextLibrary")
-    if ktl and ktl:IsValid() then
-        ftext = try(function() return ktl:Conv_StringToText(text) end)
+    local ftext = make_ftext(text)
+    if not ftext then
+        Log.discover("menuinject: could not construct FText — no label possible")
+        return false
     end
     if ftext and try(function() entry:SetText(ftext) return true end) then
         Log.discover("menuinject: label set via entry:SetText")
@@ -239,6 +251,7 @@ local function attempt()
     hook_clicks(template_class_name)
     -- Until the click hook resolves, advertise the working key on the label.
     set_label(clone, click_hooked and "ROGUELIKE" or "ROGUELIKE  [F6]")
+    try(function() clone:SetVisibility(0) end) -- 0 = ESlateVisibility::Visible
 
     injected = clone
     Log.info("menuinject: ROGUELIKE entry injected into the main menu")

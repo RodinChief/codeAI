@@ -372,6 +372,45 @@ function Gameapi.discovery_dump()
         Log.discover("TextBlock scan: FindAllOf unavailable")
     end
 
+    -- UFunction scan: walk every UObject, keep the UFunctions whose names
+    -- touch this mod's unknowns. One press answers the menu-button click
+    -- handler AND is the best shot at the mission-launch call. The walk can
+    -- hitch the game for a few seconds — expected, it's a manual F7 action.
+    local func_class = try("find Function class", StaticFindObject,
+        "/Script/CoreUObject.Function")
+    if func_class and func_class:IsValid() and type(ForEachUObject) == "function" then
+        Log.discover("UFunction scan: walking all UObjects (game may hitch)...")
+        local fc_addr = func_class:GetAddress()
+        local pats = { "StandaloneButton", "MainMenu", "Skull", "Insertion",
+            "Remix", "Deploy", "StartMission", "LaunchMission", "StartCampaign",
+            "RallyPoint", "Difficulty", "ModifierPreset" }
+        local total, funcs, matched = 0, 0, {}
+        local ok_scan = pcall(function()
+            ForEachUObject(function(obj)
+                total = total + 1
+                pcall(function()
+                    if obj:GetClass():GetAddress() == fc_addr then
+                        funcs = funcs + 1
+                        local name = fstr(obj:GetFullName())
+                        for _, p in ipairs(pats) do
+                            if name:find(p, 1, true) then
+                                if #matched < 300 then matched[#matched + 1] = name end
+                                break
+                            end
+                        end
+                    end
+                end)
+            end)
+        end)
+        Log.discover("UFunction scan: %d objects, %d functions, %d matches (ok=%s)",
+            total, funcs, #matched, tostring(ok_scan))
+        for _, n in ipairs(matched) do
+            Log.discover("  FN %s", n)
+        end
+    else
+        Log.discover("UFunction scan unavailable (no ForEachUObject in this UE4SS)")
+    end
+
     -- Where do saves actually live? List the Saved dir so saveguard can be
     -- pointed at the right subfolder.
     local Paths = require("paths")
