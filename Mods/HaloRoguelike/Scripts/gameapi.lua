@@ -161,31 +161,6 @@ function Gameapi.resolve()
         end
     end
 
-    if not R.mission_launcher then
-        for _, cls in ipairs(CANDIDATES.mission_launcher_class) do
-            local obj = find_first(cls)
-            if obj then
-                Log.discover("mission_launcher candidate instance: %s",
-                    full_name(obj))
-                for _, fn in ipairs(CANDIDATES.mission_launch_fn) do
-                    local has = try("probe " .. cls .. ":" .. fn, function()
-                        return obj[fn] ~= nil
-                    end)
-                    if has then
-                        R.mission_launcher, R.mission_launch_fn = obj, fn
-                        Log.discover("mission launch RESOLVED: %s:%s", cls, fn)
-                        break
-                    end
-                end
-                if R.mission_launcher then break end
-            end
-        end
-        if not R.mission_launcher then
-            Log.discover("mission launch UNRESOLVED — run the F7 discovery dump "
-                .. "and see docs/DISCOVERY.md")
-        end
-    end
-
     return Gameapi.status()
 end
 
@@ -193,7 +168,9 @@ function Gameapi.status()
     return {
         build_version      = R.build_version,
         user_settings      = R.user_settings ~= nil,
-        mission_launch     = R.mission_launcher ~= nil,
+        -- Launch path CONFIRMED on-device 2026-07-28: WBP_MainMenu_C:
+        -- LaunchCampaignMap(CampaignData, "b30") loaded the B30 mission map.
+        mission_launch     = true,
         mission_complete_hook = R.mission_complete_hook ~= nil,
         player_death_hook  = R.player_death_hook ~= nil,
     }
@@ -357,14 +334,58 @@ function Gameapi.dump_signatures()
     end
 end
 
--- Classic Halo scenario ids, confirmed plausible by the menu's own
--- "PlayButton_B30New" (b30 = The Silent Cartographer).
+-- Classic Halo scenario ids, CONFIRMED on-device 2026-07-28: launching floor 1
+-- (silent_cartographer -> "b30") loaded /Game/Levels/Halo1/Solo/B30/B30.B30.
 local SCENARIOS = {
     pillar_of_autumn = "a10", halo = "a30", truth_and_rec = "a50",
     silent_cartographer = "b30", assault_ctrl_room = "b40",
     guilty_spark = "c10", library = "c20", two_betrayals = "c40",
     keyes = "d20", maw = "d40",
 }
+
+-- One bounded GUObjectArray walk collecting objects whose full name contains
+-- any of the substrings (classes/functions excluded). Walks are ~1s each, so
+-- batch every lookup a launch needs into a single call.
+local function scan_multi(substrs, cap_each)
+    cap_each = cap_each or 20
+    local out = {}
+    for _, s in ipairs(substrs) do out[s] = {} end
+    pcall(function()
+        ForEachUObject(function(obj)
+            pcall(function()
+                local name = fstr(obj:GetFullName())
+                if name:find("^Class ") or name:find("^Function ")
+                    or name:find("^WidgetBlueprintGeneratedClass ") then
+                    return
+                end
+                for _, s in ipairs(substrs) do
+                    local t = out[s]
+                    if #t < cap_each and name:find(s, 1, true) then
+                        t[#t + 1] = { obj = obj, name = name }
+                    end
+                end
+            end)
+        end)
+    end)
+    return out
+end
+
+-- Log an object's property names/types (read-only reflection). The output is
+-- the discovery data needed to switch from BPFL calls to direct writes.
+local function dump_props(obj, label)
+    local cls = try("GetClass", function() return obj:GetClass() end)
+    if not cls then return end
+    local parts = {}
+    pcall(function()
+        cls:ForEachProperty(function(prop)
+            local pname = fstr(prop:GetFName())
+            local ptype = "?"
+            pcall(function() ptype = fstr(prop:GetClass():GetFName()) end)
+            parts[#parts + 1] = pname .. ":" .. ptype
+        end)
+    end)
+    Log.discover("PROPS %s: %s", label, table.concat(parts, ", "))
+end
 
 -- Locate the CampaignData asset LaunchCampaignMap wants. Candidates first,
 -- then a substring scan over GUObjectArray (fast; ~50k objects).
@@ -423,6 +444,11 @@ function Gameapi.launch_floor(floor, active_skulls)
     local rally_index = ({ Alpha = 0, Bravo = 1, Charlie = 2, Delta = 3 })
         [floor.rally] or 0
 
+    -- One object-array walk for everything this launch needs: the MapInfo
+    -- asset (rally-capable launch), the client lobby data (skull/rally
+    -- property discovery) and any live CampaignSetup (Selected* helpers).
+    local scans = scan_multi({ "MapInfo", "ClientLobbyData", "CampaignSetup" }, 20)
+
     -- Lobby setup via the game's own helpers (signatures confirmed by SIG dump:
     -- SetClientLobbyDifficulty(Difficulty, WorldContext)).
     local bpfl = try("find BPFL_CampaignMenuHelpers", StaticFindObject,
@@ -433,16 +459,86 @@ function Gameapi.launch_floor(floor, active_skulls)
         end)
         Log.discover("launch: SetClientLobbyDifficulty(%d) -> %s",
             diff_index, okd and "OK" or tostring(errd))
-        local has_ip = try("probe SetClientLobbyInsertionPoint", function()
-            return bpfl.SetClientLobbyInsertionPoint ~= nil
+
+        -- Skulls: pull the Campaign Remix skull set out of the game's own
+        -- helper and push it into the lobby. SIGs: GetRemixSkullsSet(WC) ->
+        -- RemixSkull:Set (out param), SetClientLobbySkulls(Skulls:Set, WC).
+        local okg, skulls_set = pcall(function()
+            return bpfl:GetRemixSkullsSet(screen)
         end)
-        if has_ip then
-            local oki, erri = pcall(function()
-                bpfl:SetClientLobbyInsertionPoint(rally_index, screen)
+        Log.discover("launch: GetRemixSkullsSet -> %s (type %s)",
+            okg and "OK" or tostring(skulls_set), type(skulls_set))
+        if okg and skulls_set ~= nil then
+            local oks, errs = pcall(function()
+                bpfl:SetClientLobbySkulls(skulls_set, screen)
             end)
-            Log.discover("launch: SetClientLobbyInsertionPoint(%d) -> %s",
-                rally_index, oki and "OK" or tostring(erri))
+            Log.discover("launch: SetClientLobbySkulls(remix set) -> %s",
+                oks and "OK" or tostring(errs))
         end
+
+        -- Rally point + difficulty through the campaign-setup route, when a
+        -- live CampaignSetup exists. SIGs: SelectedInsertionPoint(PC,
+        -- CampaignSetup, InsertionPoint:Int, WC) / SelectedDifficulty(...).
+        local pc = find_first("PlayerController")
+        local setup = nil
+        for _, e in ipairs(scans.CampaignSetup) do
+            Log.discover("launch: CampaignSetup candidate: %s", e.name)
+            if not setup and not e.name:find("Default__", 1, true) then
+                setup = e.obj
+            end
+        end
+        if pc and setup then
+            local ok1, e1 = pcall(function()
+                bpfl:SelectedDifficulty(pc, setup, diff_index, screen)
+            end)
+            Log.discover("launch: SelectedDifficulty(%d) -> %s", diff_index,
+                ok1 and "OK" or tostring(e1))
+            local ok2, e2 = pcall(function()
+                bpfl:SelectedInsertionPoint(pc, setup, rally_index, screen)
+            end)
+            Log.discover("launch: SelectedInsertionPoint(%d) -> %s", rally_index,
+                ok2 and "OK" or tostring(e2))
+        elseif not setup then
+            Log.discover("launch: no live CampaignSetup object")
+        end
+    end
+
+    -- ClientLobbyData discovery: SetClientLobby* writes into this object, so
+    -- its property list is the recipe for direct rally/skull writes.
+    for _, e in ipairs(scans.ClientLobbyData) do
+        Log.discover("launch: ClientLobbyData: %s", e.name)
+        if not e.name:find("Default__", 1, true) then
+            dump_props(e.obj, e.name)
+        end
+    end
+
+    -- Rally-capable launch: the campaign submenu's own overload, SIG-confirmed
+    -- as LaunchCampaignMap(MapInfo:Object, InsertionPoint:Int).
+    local id_up = scen:upper()
+    local campmenu = find_first("WBP_CampaignMenu_C")
+    if campmenu then
+        local mapinfo = nil
+        for _, e in ipairs(scans.MapInfo) do
+            Log.discover("launch: MapInfo candidate: %s", e.name)
+            if not mapinfo and not e.name:find("Default__", 1, true)
+                and (e.name:find(id_up, 1, true) or e.name:find(scen, 1, true)) then
+                mapinfo = e
+            end
+        end
+        if mapinfo then
+            local okm, errm = pcall(function()
+                campmenu:LaunchCampaignMap(mapinfo.obj, rally_index)
+            end)
+            Log.discover("launch: CampaignMenu.LaunchCampaignMap(%s, rally %d) -> %s",
+                mapinfo.name, rally_index, okm and "OK" or tostring(errm))
+            if okm then return true end
+        else
+            Log.discover("launch: no MapInfo asset matched %q — rally point "
+                .. "cannot be applied on this path", id_up)
+        end
+    else
+        Log.discover("launch: WBP_CampaignMenu_C not present — falling back to "
+            .. "the main-menu launch (starts at the mission beginning)")
     end
 
     -- Preferred path: the menu's own LaunchCampaignMap(CampaignData, Scenario).
@@ -489,6 +585,39 @@ function Gameapi.resume_remix_save()
     local ok, err = pcall(function() statics:ResumeRemixSave(pc) end)
     Log.discover("ResumeRemixSave -> %s", ok and "OK" or tostring(err))
     return ok
+end
+
+-- In-mission skull discovery: the FN dump shows a game-state skulls component
+-- (BP_BaseBlamEffect:GetGameStateSkullsComponent, BlamEngineAudioGameSubsystem:
+-- GetActiveSkulls, Pawn OnSkullsAdded/Removed) — meaning skulls live on a
+-- component that only exists inside a mission. This logs its class, functions
+-- and properties so skull forcing can move from the lobby (fragile) to a
+-- direct in-mission call. Triggered ~20s after a Solo map loads (main.lua).
+function Gameapi.dump_skull_objects()
+    Log.discover("==== in-mission skull discovery start ====")
+    local matches = scan_multi({ "Skulls", "InsertionPoint" }, 30)
+    local seen_cls = {}
+    for _, key in ipairs({ "Skulls", "InsertionPoint" }) do
+        for _, e in ipairs(matches[key]) do
+            Log.discover("SKOBJ %s", e.name)
+            local cls = try("GetClass", function() return e.obj:GetClass() end)
+            local cname = cls and full_name(cls) or "?"
+            if cls and not seen_cls[cname] then
+                seen_cls[cname] = true
+                local fns = {}
+                pcall(function()
+                    cls:ForEachFunction(function(fn)
+                        fns[#fns + 1] = fstr(fn:GetFName())
+                    end)
+                end)
+                if #fns > 0 then
+                    Log.discover("SKFNS %s: %s", cname, table.concat(fns, ", "))
+                end
+                dump_props(e.obj, cname)
+            end
+        end
+    end
+    Log.discover("==== in-mission skull discovery end ====")
 end
 
 -- ------------------------------------------------------------ discovery

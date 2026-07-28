@@ -87,6 +87,10 @@ local function start_current_floor()
     local ok, err = Gameapi.launch_floor(fl, skulls)
     if ok then
         Ui.set_notice(nil)
+        -- Restore the main menu before the mission takes over: leftover
+        -- visible/focusable mod rows in the persistent widget tree steal
+        -- controller focus in-game (symptom: pause menu never shows).
+        Menuinject.close()
     else
         -- Manual-launch fallback: the floor card shows mission/rally/difficulty;
         -- the player launches via Campaign -> New Game (+ debug menu for skulls).
@@ -269,9 +273,10 @@ local function finish_init(build_ok, build)
         primary_action()
     end)
 
-    -- Map-load logging: captures real mission level names when a mission is
-    -- deployed (discovery for const.lua and for mission-complete detection —
-    -- a mission map returning to the Frontend map means the floor ended).
+    -- Map-load hook: logs real mission level names (discovery), force-closes
+    -- the in-menu submenu on every transition (stale mod rows must never sit
+    -- visible/focusable over a mission — that blocks the pause menu), and
+    -- kicks the in-mission skull discovery once a Solo mission map is up.
     local ok_hook = pcall(function()
         RegisterLoadMapPostHook(function(...)
             local parts = {}
@@ -285,7 +290,21 @@ local function finish_init(build_ok, build)
                 end)
                 if ok and s then parts[#parts + 1] = s end
             end
-            Log.discover("map loaded: %s", table.concat(parts, " | "))
+            local joined = table.concat(parts, " | ")
+            Log.discover("map loaded: %s", joined)
+            ExecuteInGameThread(function()
+                pcall(Menuinject.close)
+            end)
+            if joined:find("/Solo/", 1, true) then
+                -- One-shot: let the mission finish loading, then dump the
+                -- skull component (LoopAsync stops on first true).
+                pcall(function()
+                    LoopAsync(20000, function()
+                        pcall(Gameapi.dump_skull_objects)
+                        return true
+                    end)
+                end)
+            end
         end)
     end)
     Log.info("main: map-load logging %s", ok_hook and "active" or "unavailable")
