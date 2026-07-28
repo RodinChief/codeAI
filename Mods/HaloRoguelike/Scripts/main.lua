@@ -27,6 +27,10 @@ local init_done = false
 -- after a launch, so the first event per floor is swallowed.
 local expect_spawn_event = false
 
+-- Set by the map-load hook when a Solo mission map comes up; the launch
+-- watchdog uses it to detect launches that reported OK but did nothing.
+local mission_map_seen = false
+
 -- ------------------------------------------------------------- floor flow
 
 local function handle_run_ended()
@@ -84,6 +88,7 @@ local function start_current_floor()
     end
 
     local skulls = State.active_skulls()
+    mission_map_seen = false
     local ok, err = Gameapi.launch_floor(fl, skulls)
     if ok then
         Ui.set_notice(nil)
@@ -91,6 +96,25 @@ local function start_current_floor()
         -- visible/focusable mod rows in the persistent widget tree steal
         -- controller focus in-game (symptom: pause menu never shows).
         Menuinject.close()
+        -- Watchdog: a launch call can report OK yet load nothing (seen
+        -- on-device with a wrong CampaignData asset). If no mission map is
+        -- up after 30s, put the floor back in briefing so the player can
+        -- simply select it again — next attempt avoids the dead path.
+        pcall(function()
+            LoopAsync(30000, function()
+                if not mission_map_seen and State.run
+                    and State.run.floor_status == State.FLOOR.IN_MISSION then
+                    Log.warn("main: launch reported OK but no mission map "
+                        .. "loaded within 30s — reverting floor to briefing")
+                    Gameapi.distrust_campmenu_launch()
+                    State.run.floor_status = State.FLOOR.BRIEFING
+                    State.save()
+                    Ui.set_notice("Launch did not take — select the floor again")
+                    Ui.dirty()
+                end
+                return true
+            end)
+        end)
     else
         -- Manual-launch fallback: the floor card shows mission/rally/difficulty;
         -- the player launches via Campaign -> New Game (+ debug menu for skulls).
@@ -296,6 +320,7 @@ local function finish_init(build_ok, build)
                 pcall(Menuinject.close)
             end)
             if joined:find("/Solo/", 1, true) then
+                mission_map_seen = true
                 -- One-shot: let the mission finish loading, then dump the
                 -- skull component (LoopAsync stops on first true).
                 pcall(function()

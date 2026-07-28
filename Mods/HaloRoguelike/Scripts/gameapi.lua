@@ -387,6 +387,18 @@ local function dump_props(obj, label)
     Log.discover("PROPS %s: %s", label, table.concat(parts, ", "))
 end
 
+-- Set when a rally-capable CampaignMenu launch reported OK but no mission map
+-- ever loaded (main.lua's watchdog): later launches skip that path and use
+-- the known-good main-menu launch instead of failing the same way forever.
+local campmenu_distrusted = false
+function Gameapi.distrust_campmenu_launch()
+    if not campmenu_distrusted then
+        campmenu_distrusted = true
+        Log.warn("gameapi: CampaignMenu launch path distrusted — future launches "
+            .. "use the main-menu path (no rally point selection)")
+    end
+end
+
 -- Locate the CampaignData asset LaunchCampaignMap wants. Candidates first,
 -- then a substring scan over GUObjectArray (fast; ~50k objects).
 local cached_campaign_data = nil
@@ -395,6 +407,15 @@ function Gameapi.find_campaign_data()
         and pcall(function() return cached_campaign_data:IsValid() end)
         and cached_campaign_data:IsValid() then
         return cached_campaign_data
+    end
+    -- Known-good asset first: launching with DA_FirstPlayableCampaign loaded
+    -- the B30 mission on-device (2026-07-28, 21:44 log).
+    local known = try("find DA_FirstPlayableCampaign", StaticFindObject,
+        "/Game/Blueprints/Campaign/DA_FirstPlayableCampaign.DA_FirstPlayableCampaign")
+    if known and known:IsValid() then
+        Log.discover("CD resolved via known asset path: %s", full_name(known))
+        cached_campaign_data = known
+        return known
     end
     for _, cls in ipairs({ "CampaignData", "MeteoriteCampaignData",
         "BlamCampaignData", "CampaignUIInfo" }) do
@@ -405,10 +426,14 @@ function Gameapi.find_campaign_data()
             return obj
         end
     end
-    local found = nil
+    -- Scan fallback. Collect ALL candidates and prefer the non-test campaign:
+    -- the scan order is not stable, and on-device it once returned
+    -- DA_TestMapsCampaign — LaunchCampaignMap accepted it and silently did
+    -- nothing ("b30" is not a scenario of that campaign).
+    local cands = {}
     pcall(function()
         ForEachUObject(function(obj)
-            if found then return end
+            if #cands >= 10 then return end
             pcall(function()
                 local name = fstr(obj:GetFullName())
                 if name:find("CampaignData", 1, true)
@@ -416,13 +441,21 @@ function Gameapi.find_campaign_data()
                     and not name:find("^Class ")
                     and not name:find("^Function ") then
                     Log.discover("CD candidate: %s", name)
-                    found = obj
+                    cands[#cands + 1] = { obj = obj, name = name }
                 end
             end)
         end)
     end)
-    cached_campaign_data = found
-    return found
+    local pick = nil
+    for _, c in ipairs(cands) do
+        if not c.name:find("Test") and not c.name:find("test") then
+            pick = c.obj
+            break
+        end
+    end
+    if not pick and cands[1] then pick = cands[1].obj end
+    cached_campaign_data = pick
+    return pick
 end
 
 function Gameapi.launch_floor(floor, active_skulls)
@@ -461,14 +494,26 @@ function Gameapi.launch_floor(floor, active_skulls)
             diff_index, okd and "OK" or tostring(errd))
 
         -- Skulls: pull the Campaign Remix skull set out of the game's own
-        -- helper and push it into the lobby. SIGs: GetRemixSkullsSet(WC) ->
-        -- RemixSkull:Set (out param), SetClientLobbySkulls(Skulls:Set, WC).
-        local okg, skulls_set = pcall(function()
-            return bpfl:GetRemixSkullsSet(screen)
+        -- helper and push it into the lobby. SIGs: GetRemixSkullsSet(WC,
+        -- RemixSkull:Set OUT) / SetClientLobbySkulls(Skulls:Set, WC). UE4SS
+        -- out params take a Lua table that gets filled by the call.
+        local out = {}
+        local okg, errg = pcall(function()
+            bpfl:GetRemixSkullsSet(screen, out)
         end)
-        Log.discover("launch: GetRemixSkullsSet -> %s (type %s)",
-            okg and "OK" or tostring(skulls_set), type(skulls_set))
-        if okg and skulls_set ~= nil then
+        Log.discover("launch: GetRemixSkullsSet -> %s",
+            okg and "OK" or tostring(errg))
+        local skulls_set = out.RemixSkull or out[1]
+        if okg then
+            local keys = {}
+            for k, v in pairs(out) do
+                keys[#keys + 1] = tostring(k) .. "=" .. type(v)
+                if skulls_set == nil then skulls_set = v end
+            end
+            Log.discover("launch: GetRemixSkullsSet out params: {%s}",
+                table.concat(keys, ", "))
+        end
+        if skulls_set ~= nil then
             local oks, errs = pcall(function()
                 bpfl:SetClientLobbySkulls(skulls_set, screen)
             end)
@@ -498,6 +543,9 @@ function Gameapi.launch_floor(floor, active_skulls)
             end)
             Log.discover("launch: SelectedInsertionPoint(%d) -> %s", rally_index,
                 ok2 and "OK" or tostring(e2))
+            -- Property dump AFTER the writes: shows whether the values stuck
+            -- and which fields exist for direct writes (incl. a Skulls set).
+            dump_props(setup, "CampaignSetup(after Selected*)")
         elseif not setup then
             Log.discover("launch: no live CampaignSetup object")
         end
@@ -513,32 +561,51 @@ function Gameapi.launch_floor(floor, active_skulls)
     end
 
     -- Rally-capable launch: the campaign submenu's own overload, SIG-confirmed
-    -- as LaunchCampaignMap(MapInfo:Object, InsertionPoint:Int).
+    -- as LaunchCampaignMap(MapInfo:Object, InsertionPoint:Int). The widget
+    -- does not exist while sitting on the main menu, so create an instance of
+    -- its class on the fly — it is only used as the call target.
     local id_up = scen:upper()
-    local campmenu = find_first("WBP_CampaignMenu_C")
-    if campmenu then
-        local mapinfo = nil
-        for _, e in ipairs(scans.MapInfo) do
-            Log.discover("launch: MapInfo candidate: %s", e.name)
-            if not mapinfo and not e.name:find("Default__", 1, true)
-                and (e.name:find(id_up, 1, true) or e.name:find(scen, 1, true)) then
-                mapinfo = e
+    local mapinfo = nil
+    for _, e in ipairs(scans.MapInfo) do
+        Log.discover("launch: MapInfo candidate: %s", e.name)
+        if not mapinfo and not e.name:find("Default__", 1, true)
+            and (e.name:find(id_up, 1, true) or e.name:find(scen, 1, true)) then
+            mapinfo = e
+        end
+    end
+    local campmenu = (not campmenu_distrusted) and find_first("WBP_CampaignMenu_C")
+        or nil
+    if not campmenu and mapinfo and not campmenu_distrusted then
+        local cls = try("find WBP_CampaignMenu class", StaticFindObject,
+            "/Game/UI/Frontend/CampaignMenu/Widgets/WBP_CampaignMenu.WBP_CampaignMenu_C")
+        local wbl = try("find WidgetBlueprintLibrary", StaticFindObject,
+            "/Script/UMG.Default__WidgetBlueprintLibrary")
+        if cls and cls:IsValid() and wbl and wbl:IsValid() then
+            local owner = try("GetOwningPlayer", function()
+                return screen:GetOwningPlayer()
+            end)
+            local okc, created = pcall(function()
+                return wbl:Create(screen, cls, owner)
+            end)
+            if okc and created and created:IsValid() then
+                campmenu = created
+                Log.discover("launch: WBP_CampaignMenu created on the fly")
+            else
+                Log.discover("launch: could not create WBP_CampaignMenu (%s)",
+                    tostring(created))
             end
         end
-        if mapinfo then
-            local okm, errm = pcall(function()
-                campmenu:LaunchCampaignMap(mapinfo.obj, rally_index)
-            end)
-            Log.discover("launch: CampaignMenu.LaunchCampaignMap(%s, rally %d) -> %s",
-                mapinfo.name, rally_index, okm and "OK" or tostring(errm))
-            if okm then return true end
-        else
-            Log.discover("launch: no MapInfo asset matched %q — rally point "
-                .. "cannot be applied on this path", id_up)
-        end
-    else
-        Log.discover("launch: WBP_CampaignMenu_C not present — falling back to "
-            .. "the main-menu launch (starts at the mission beginning)")
+    end
+    if campmenu and mapinfo then
+        local okm, errm = pcall(function()
+            campmenu:LaunchCampaignMap(mapinfo.obj, rally_index)
+        end)
+        Log.discover("launch: CampaignMenu.LaunchCampaignMap(%s, rally %d) -> %s",
+            mapinfo.name, rally_index, okm and "OK" or tostring(errm))
+        if okm then return true end
+    elseif not mapinfo then
+        Log.discover("launch: no MapInfo asset matched %q — rally point "
+            .. "cannot be applied on this path", id_up)
     end
 
     -- Preferred path: the menu's own LaunchCampaignMap(CampaignData, Scenario).
