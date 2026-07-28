@@ -273,13 +273,8 @@ function Gameapi.apply_nerf_preset()
         Log.warn("gameapi: struct-path write failed; property layout needs discovery")
         return false
     end
-    -- Discovered toggle (F7 scan): the game gates modifiers behind this.
-    local statics = try("find MeteoriteUIStatics", StaticFindObject,
-        "/Script/Meteorite.Default__MeteoriteUIStatics")
-    if statics and statics:IsValid() then
-        local okt = pcall(function() statics:SetDifficultyModifiersEnabled(true) end)
-        Log.info("gameapi: SetDifficultyModifiersEnabled(true) -> %s", tostring(okt))
-    end
+    -- SetDifficultyModifiersEnabled exists (F7 scan) but stays uncalled until
+    -- the SIG dump confirms its parameters — blind calls caused a fatal error.
     Log.info("gameapi: nerf preset applied (ModifierPreset=%s)",
         Presets.MODIFIER_PRESET_VALUE)
     return true
@@ -292,11 +287,6 @@ function Gameapi.clear_modifiers()
     if not us then return false end
     local ok = pcall(function() us.ModifierPreset = "None" end)
     Log.info("gameapi: ModifierPreset=None -> %s", ok and "ok" or "FAILED")
-    local statics = try("find MeteoriteUIStatics", StaticFindObject,
-        "/Script/Meteorite.Default__MeteoriteUIStatics")
-    if statics and statics:IsValid() then
-        pcall(function() statics:SetDifficultyModifiersEnabled(false) end)
-    end
     return ok
 end
 
@@ -312,64 +302,62 @@ end
 -- those errors state the expected parameter count/types, which is exactly the
 -- data needed to finalize the shapes.
 local BPFL_PATH = "/Game/UI/Frontend/CampaignMenu/Data/BPFL_CampaignMenuHelpers."
-    .. "Default__BPFL_CampaignMenuHelpers_C"
+    .. "BPFL_CampaignMenuHelpers_C"
 
-local function attempt_calls(label, variants)
-    for _, v in ipairs(variants) do
-        local ok, err = pcall(v.fn)
-        Log.discover("launch attempt %s %s -> %s", label, v.desc,
-            ok and "OK" or ("ERR: " .. tostring(err)))
-        if ok then return true end
+-- Read-only signature reflection: logs each UFunction's parameter names and
+-- types. No game code executes — this replaced the blind-call probing that
+-- crashed the game (param-count errors: LaunchCampaignMap=2, Selected*=4).
+local SIG_TARGETS = {
+    "/Game/UI/Frontend/MainMenu/Widgets/WBP_MainMenu.WBP_MainMenu_C:LaunchCampaignMap",
+    BPFL_PATH .. ":SelectedDifficulty",
+    BPFL_PATH .. ":SelectedInsertionPoint",
+    BPFL_PATH .. ":SelectedSkulls",
+    BPFL_PATH .. ":SetClientLobbySkulls",
+    BPFL_PATH .. ":SetClientLobbyDifficulty",
+    BPFL_PATH .. ":GetRemixSkullsSet",
+    BPFL_PATH .. ":GetAllSkullsSet",
+    "/Script/Meteorite.MeteoriteUIStatics:ResumeRemixSave",
+    "/Script/Meteorite.MeteoriteUIStatics:SetDifficultyModifiersEnabled",
+    "/Script/Meteorite.MeteoriteUIStatics:IsInsertionPointLocked",
+    "/Game/UI/Frontend/CampaignMenu/Data/RandomSkulls/BPFL_RandomSkullsHelpers."
+        .. "BPFL_RandomSkullsHelpers_C:GetRandomizedSkulls",
+}
+
+function Gameapi.dump_signatures()
+    for _, path in ipairs(SIG_TARGETS) do
+        local fn = try("find " .. path, StaticFindObject, path)
+        if fn and fn:IsValid() then
+            local parts = {}
+            local ok = pcall(function()
+                fn:ForEachProperty(function(prop)
+                    local pname = fstr(prop:GetFName())
+                    local ptype = "?"
+                    pcall(function()
+                        ptype = fstr(prop:GetClass():GetFName())
+                    end)
+                    parts[#parts + 1] = string.format("%s:%s", pname, ptype)
+                end)
+            end)
+            if ok then
+                Log.discover("SIG %s(%s)", path:match("[^:]+$"),
+                    table.concat(parts, ", "))
+            else
+                Log.discover("SIG %s: ForEachProperty unavailable", path)
+            end
+        else
+            Log.discover("SIG %s: function object not found", path)
+        end
     end
-    return false
 end
 
 function Gameapi.launch_floor(floor, active_skulls)
     Log.info("gameapi: launch request — mission=%s rally=%s difficulty=%s skulls=[%s]",
         floor.mission_id, floor.rally, floor.difficulty,
         table.concat(active_skulls, ","))
-
-    local screen = find_first("WBP_MainMenu_C")
-    if not screen then
-        return false, "main menu widget not found (launch only works from the menu)"
-    end
-
-    -- Difficulty index: Easy=0 Normal=1 Heroic=2 Legendary=3 (standard order).
-    local diff_index = ({ Easy = 0, Normal = 1, Heroic = 2, Legendary = 3 })
-        [floor.difficulty] or 1
-    local rally_index = ({ Alpha = 0, Bravo = 1, Charlie = 2, Delta = 3 })
-        [floor.rally] or 0
-
-    local bpfl = try("find BPFL_CampaignMenuHelpers", StaticFindObject, BPFL_PATH)
-    if bpfl and bpfl:IsValid() then
-        attempt_calls("SelectedDifficulty", {
-            { desc = "(int)", fn = function() bpfl:SelectedDifficulty(diff_index) end },
-            { desc = "(string)", fn = function() bpfl:SelectedDifficulty(floor.difficulty) end },
-        })
-        attempt_calls("SelectedInsertionPoint", {
-            { desc = "(int)", fn = function() bpfl:SelectedInsertionPoint(rally_index) end },
-        })
-        attempt_calls("SetClientLobbySkulls(remix set)", {
-            { desc = "(GetRemixSkullsSet())", fn = function()
-                bpfl:SetClientLobbySkulls(bpfl:GetRemixSkullsSet())
-            end },
-        })
-    else
-        Log.discover("launch: BPFL_CampaignMenuHelpers CDO not found at %s", BPFL_PATH)
-    end
-
-    local launched = attempt_calls("LaunchCampaignMap", {
-        { desc = "()", fn = function() screen:LaunchCampaignMap() end },
-        { desc = "(mission)", fn = function()
-            screen:LaunchCampaignMap(FName and FName(floor.mission_id) or floor.mission_id)
-        end },
-        { desc = "(mission,int)", fn = function()
-            screen:LaunchCampaignMap(FName and FName(floor.mission_id)
-                or floor.mission_id, rally_index)
-        end },
-    })
-    if launched then return true end
-    return false, "LaunchCampaignMap signature mismatch — see 'launch attempt' log lines"
+    -- Auto-launch is intentionally disabled until the SIG dump pins the exact
+    -- parameter types (the previous blind-call probing caused a fatal error).
+    Gameapi.dump_signatures()
+    return false, "auto-launch paused: signatures captured to UE4SS.log (SIG lines)"
 end
 
 -- Continue support discovered in the same scan.
