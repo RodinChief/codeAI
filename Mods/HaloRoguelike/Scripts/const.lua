@@ -10,7 +10,11 @@ local Const = {}
 
 -- Build strings this mod is known to work against. Anything else refuses to
 -- load (see config.allow_unknown_build) rather than crash on stale offsets.
+-- GetBuildVersion reports the string WITHOUT the "5.5.4-" engine prefix seen
+-- in the full build string (confirmed on-device 2026-07-28); both forms are
+-- listed so either source matches.
 Const.KNOWN_BUILDS = {
+    ["2026.06.26.1097863.1-Rel-i343-Meteorite-2606-CU2"] = true,
     ["5.5.4-2026.06.26.1097863.1-Rel-i343-Meteorite-2606-CU2"] = true,
 }
 
