@@ -365,6 +365,9 @@ local function finish_init(build_ok, build)
     -- objects: the CXX header dump names these enums but not their members,
     -- and the launch call needs the real values.
     pcall(Gameapi.dump_enums)
+    -- Every skull-related UFunction the build exposes, with its signature.
+    -- Pure reflection; this is what decides whether skulls can be set at all.
+    pcall(Gameapi.dump_skull_api)
     Gameapi.on_mission_complete(handle_floor_complete)
     Gameapi.on_player_death(handle_death)
 
@@ -483,9 +486,9 @@ function watch_world()
     if entering_mission then
         launch_pending = false
         mission_seen_since_launch = true
-        -- Report which skulls the mission actually got, once it has settled.
-        -- Reporting, not setting: forcing a skull needs a gameplay tag built
-        -- from Lua, and that crashes the game (see gameapi.lua).
+        -- Switch the run's skulls on, then report what the mission really
+        -- has. Setting goes through the game's own skull UFunctions with
+        -- scalar arguments only — no struct is ever built (see gameapi.lua).
         if State.run and State.run.floor_status == State.FLOOR.IN_MISSION then
             local ids = State.active_skulls()
             local values = Gameapi.skull_enum_values(ids)

@@ -21,10 +21,15 @@ Config.skull_roll = { min = 1, max = 2, floor5 = 2 }
 
 -- Log which skull gameplay tags the running mission actually has. Read-only
 -- and safe, but it is reflection on a live component, so it can be switched
--- off. Setting skulls is NOT possible from Lua on this build: building a
--- gameplay tag from a Lua table crashes the game, and every other route needs
--- one. See docs/DISCOVERY.md.
+-- off. Note that gameplay tags can never be BUILT from Lua on this build —
+-- doing so crashes the game — so this only ever reads. See docs/DISCOVERY.md.
 Config.report_skull_tags = true
+
+-- Try to switch the run's skulls on by calling the game's own skull UFunctions
+-- (see gameapi.dump_skull_api). Only functions taking scalar arguments are
+-- called and the console is the fallback, so nothing here constructs a struct
+-- — this is the safe half of skull setting.
+Config.set_skulls = true
 
 -- Activate a roguelike menu row by RESTING on it, instead of pressing it.
 --

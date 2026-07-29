@@ -1124,6 +1124,200 @@ function Gameapi.dump_skull_tags()
     return names
 end
 
+-- ------------------------------------------------- skull function discovery
+--
+-- scan_multi deliberately skips objects whose full name starts with
+-- "Function ", which is why no skull-setting UFunction has ever shown up in a
+-- dump. This scans for exactly those.
+--
+-- Everything here is reflection metadata (names, types) plus calls whose
+-- arguments are SCALARS ONLY — a number, a bool, a string. Scalars marshal
+-- cleanly; it is structs built from Lua tables that crash the game, and none
+-- are built here.
+
+-- A UFunction's parameter list as "Name:Type, Name:Type".
+local function fn_signature(fn)
+    local parts = {}
+    pcall(function()
+        fn:ForEachProperty(function(prop)
+            local pname = fstr(prop:GetFName())
+            local ptype = "?"
+            pcall(function() ptype = fstr(prop:GetClass():GetFName()) end)
+            parts[#parts + 1] = pname .. ":" .. ptype
+        end)
+    end)
+    return parts
+end
+
+-- Types that can be passed from Lua without constructing anything.
+local SCALAR_PROPS = {
+    ByteProperty = true, EnumProperty = true, IntProperty = true,
+    Int64Property = true, BoolProperty = true, FloatProperty = true,
+    DoubleProperty = true, NameProperty = true, StrProperty = true,
+}
+
+local skull_fns = nil  -- cached: { {fn=, name=, params={...}}, ... }
+
+-- Every UFunction whose name mentions a skull, with its signature. This is the
+-- single dump that decides whether skulls can be set at all on this build.
+-- `force` re-scans: many skull classes are only loaded once a mission is up,
+-- so the menu-time scan is not the whole picture.
+function Gameapi.dump_skull_api(force)
+    if skull_fns and not force then return skull_fns end
+    skull_fns = {}
+    local seen = {}
+    pcall(function()
+        ForEachUObject(function(obj)
+            pcall(function()
+                local name = fstr(obj:GetFullName())
+                if not name:find("^Function ") then return end
+                local low = name:lower()
+                if not (low:find("skull") or low:find("laso")) then return end
+                if seen[name] then return end
+                seen[name] = true
+                skull_fns[#skull_fns + 1] =
+                    { fn = obj, name = name, params = fn_signature(obj) }
+            end)
+        end)
+    end)
+    Log.discover("SKULLAPI ==== %d skull/LASO UFunction(s) ====", #skull_fns)
+    for _, e in ipairs(skull_fns) do
+        Log.discover("SKULLAPI %s (%s)", e.name,
+            #e.params > 0 and table.concat(e.params, ", ") or "no params")
+    end
+    if #skull_fns == 0 then
+        Log.discover("SKULLAPI nothing found — skulls are not settable through "
+            .. "a UFunction on this build")
+    end
+    return skull_fns
+end
+
+-- Split "Function /Script/Pkg.Class:Fn" into the class path and the two names.
+local function split_fn_name(full)
+    local path = full:gsub("^Function%s+", "")
+    local cls_path, fn_name = path:match("^(.*):([^:]+)$")
+    if not cls_path then return nil end
+    local pkg, cls = cls_path:match("^(.*)%.([^.]+)$")
+    return cls_path, fn_name, pkg, cls
+end
+
+-- An object to call `fn` on: a live instance first, its CDO otherwise. A
+-- Blueprint function library has no instance, so the CDO is the normal case.
+local function target_for(cls_path, cls)
+    local live = cls and try("FindFirstOf(" .. cls .. ")", FindFirstOf, cls)
+    if live and live:IsValid() then return live, "instance" end
+    local pkg, short = cls_path:match("^(.*)%.([^.]+)$")
+    if pkg and short then
+        local cdo = try("CDO " .. cls_path, StaticFindObject,
+            pkg .. ".Default__" .. short)
+        if cdo and cdo:IsValid() then return cdo, "CDO" end
+    end
+    return nil
+end
+
+-- The local player controller, for console commands.
+local function player_controller()
+    for _, cls in ipairs({ "BlamPlayerController", "MeteoritePlayerController",
+        "HaloPlayerController", "PlayerController" }) do
+        local pc = find_first(cls)
+        if pc then return pc end
+    end
+    return nil
+end
+
+-- Run a console command. APlayerController::ConsoleCommand takes an FString
+-- and a bool — both scalars — and returns the console output as an FString.
+function Gameapi.exec_console(cmd)
+    local pc = player_controller()
+    if not pc then return nil end
+    return try("ConsoleCommand " .. cmd, function()
+        return fstr(pc:ConsoleCommand(cmd, true))
+    end)
+end
+
+-- Turn on the run's skulls by calling whatever skull-setting UFunction this
+-- build exposes. `values` are EBlamGameSkulls numbers, `ids` the names.
+--
+-- Only functions that both LOOK like setters and take nothing but scalars are
+-- called. Getters (Is*/Get*/Has*/Debug_Is*) are skipped: calling them proves
+-- nothing and they are the ones most likely to be noise.
+function Gameapi.set_skulls_via_functions(values, ids)
+    if not (values and #values > 0) then return false end
+    local fns = Gameapi.dump_skull_api(true)
+    local SETTER = { "add", "set", "toggle", "enable", "activate", "apply",
+        "grant", "unlock", "give" }
+    local called = 0
+    for _, e in ipairs(fns) do
+        local cls_path, fn_name, _, cls = split_fn_name(e.name)
+        local low = (fn_name or ""):lower()
+        local looks_setter = false
+        for _, verb in ipairs(SETTER) do
+            if low:find(verb, 1, true) then looks_setter = true break end
+        end
+        -- Getters match verbs by accident ("IsSkullUnlocked" contains
+        -- "unlock"), and calling them proves nothing, so they are excluded by
+        -- name rather than by hoping the verb list is clean.
+        if low:find("^is") or low:find("^get") or low:find("^has")
+            or low:find("^can") or low:find("^debug_is") then
+            looks_setter = false
+        end
+        -- ReturnValue is not an input. More than two real inputs is not
+        -- something to guess at.
+        local scalar_only, inputs = true, 0
+        for _, p in ipairs(e.params) do
+            local pname, ptype = p:match("^(.*):([%w_]+)$")
+            if pname ~= "ReturnValue" then
+                if not SCALAR_PROPS[ptype] then scalar_only = false end
+                inputs = inputs + 1
+            end
+        end
+        if looks_setter and scalar_only and inputs >= 1 and inputs <= 2
+            and cls_path then
+            local obj, how = target_for(cls_path, cls)
+            if obj then
+                for _, v in ipairs(values) do
+                    local ok = try(string.format("%s(%d)", fn_name, v), function()
+                        if inputs == 1 then return obj[fn_name](obj, v) end
+                        return obj[fn_name](obj, v, true)
+                    end)
+                    if ok ~= nil then called = called + 1 end
+                end
+                Log.info("skulls: called %s on the %s for %d skull(s)",
+                    fn_name, how, #values)
+            else
+                Log.discover("skulls: %s looks callable but no object of %s "
+                    .. "was found", fn_name, tostring(cls))
+            end
+        end
+    end
+    if called > 0 then return true end
+
+    -- Nothing was directly callable. Second path: the console. This install
+    -- has the Meteorite ULocalPlayer::Exec bridge active and CheatManager
+    -- enabled, and an exec UFunction can be invoked by name as a command.
+    -- A console command is a STRING, so this cannot crash the way struct
+    -- construction does.
+    local tried = 0
+    for _, e in ipairs(fns) do
+        local _, fn_name = split_fn_name(e.name)
+        local low = (fn_name or ""):lower()
+        if fn_name and not (low:find("^is") or low:find("^get")
+            or low:find("^has") or low:find("__delegatesignature")) then
+            for _, id in ipairs(ids or {}) do
+                local out = Gameapi.exec_console(fn_name .. " " .. id)
+                if out and out ~= "" then
+                    Log.discover("skulls: console %q -> %s", fn_name .. " " .. id, out)
+                end
+                tried = tried + 1
+            end
+        end
+    end
+    Log.warn("skulls: no skull-setting UFunction was callable (%d console "
+        .. "command(s) tried) — see the SKULLAPI lines for everything this "
+        .. "build exposes", tried)
+    return false
+end
+
 -- Report which skulls the mission is actually running with.
 --
 -- This USED to try to force the run's skulls on, and that is where two crashes
@@ -1140,7 +1334,15 @@ end
 -- Returns false always; the caller treats that as "the game keeps its own
 -- skulls", which is what is happening.
 function Gameapi.apply_skulls_in_mission(values, ids)
-    if not Config.report_skull_tags then return false end
+    -- Try to actually set them first. Scalar-argument calls only — nothing
+    -- here builds a struct, so nothing here can crash the way tag
+    -- construction did.
+    local set_ok = false
+    if Config.set_skulls then
+        set_ok = try("set_skulls_via_functions", Gameapi.set_skulls_via_functions,
+            values, ids) == true
+    end
+    if not Config.report_skull_tags then return set_ok end
     local comp = skulls_component()
     if not comp then
         Log.discover("skulls: no live BlamSkullsGameStateComponent")
@@ -1150,10 +1352,17 @@ function Gameapi.apply_skulls_in_mission(values, ids)
         try("read ActiveSkulls", function() return comp.ActiveSkulls end))
     Log.info("skulls: the mission is running %d skull tag(s): %s",
         count, tostring(text))
-    Log.info("skulls: the run asked for [%s] — these are NOT applied; setting "
-        .. "skulls needs a path that does not build a gameplay tag from Lua",
-        table.concat(ids or {}, ", "))
-    return false
+    Log.info("skulls: the run asked for [%s]", table.concat(ids or {}, ", "))
+    local hit = 0
+    for _, id in ipairs(ids or {}) do
+        if text and text:find(id, 1, true) then hit = hit + 1 end
+    end
+    if hit == #(ids or {}) and hit > 0 then
+        Log.info("skulls: VERIFIED — every skull the run asked for is active")
+        return true
+    end
+    Log.warn("skulls: %d of %d asked-for skulls are active", hit, #(ids or {}))
+    return set_ok
 end
 
 -- In-mission skull discovery: the FN dump shows a game-state skulls component
