@@ -260,6 +260,10 @@ local function finish_init(build_ok, build)
 
     enabled = true
     Gameapi.resolve()
+    -- Read EBlamGameSkulls / EBlamCampaignDifficultyLevel from the live UEnum
+    -- objects: the CXX header dump names these enums but not their members,
+    -- and the launch call needs the real values.
+    pcall(Gameapi.dump_enums)
     Gameapi.on_mission_complete(handle_floor_complete)
     Gameapi.on_player_death(handle_death)
 

@@ -458,6 +458,53 @@ function Gameapi.find_campaign_data()
     return pick
 end
 
+-- The real campaign API, from the CXX header dump (discovery/dumps/cxx/
+-- BlamEngine.hpp) — this is what WBP_MainMenu_C:LaunchCampaignMap wraps:
+--
+--   class UBlamCampaignFlowGameSubsystem : public UGameInstanceSubsystem
+--     bool SetAndBeginCampaign(const UBlamCampaignDataAsset* Campaign,
+--                              const FName StartingScenarioName,
+--                              const FBlamScenarioGameOptions& Options);
+--
+--   struct FBlamScenarioGameOptions
+--     bool                         bLoadFromCoreSave;
+--     uint8                        SaveSlot;
+--     FString                      SavedFilmName;
+--     EBlamCampaignDifficultyLevel CampaignDifficultyLevel;
+--     int32                        InsertionPoint;     <- the rally point
+--     TSet<EBlamGameSkulls>        ActiveSkulls;       <- the skulls
+--     bool                         bFriendlyFireEnabled;
+--     bool                         bIsLASO;
+--
+-- One call sets mission + rally point + difficulty + skulls together, which
+-- is why the previous lobby-helper approach never made the rally point stick:
+-- LaunchCampaignMap builds this struct itself and overwrites the lobby values.
+local function campaign_flow_subsystem()
+    local ss = find_first("BlamCampaignFlowGameSubsystem")
+    if ss then return ss end
+    return find_first("UBlamCampaignFlowGameSubsystem")
+end
+
+-- Build the options struct as a Lua table. UE4SS marshals a table into a
+-- struct parameter by field name; unknown/omitted fields keep their defaults.
+local function scenario_game_options(diff_index, rally_index, skull_values)
+    local opts = {
+        bLoadFromCoreSave = false,
+        SaveSlot = 0,
+        CampaignDifficultyLevel = diff_index,
+        InsertionPoint = rally_index,
+        bFriendlyFireEnabled = false,
+        bIsLASO = false,
+    }
+    -- ActiveSkulls is a TSet; only send it once real enum values are known
+    -- (Gameapi.dump_enums resolves them). An empty/garbage set would clear
+    -- the skulls Campaign Remix applies for us.
+    if skull_values and #skull_values > 0 then
+        opts.ActiveSkulls = skull_values
+    end
+    return opts
+end
+
 function Gameapi.launch_floor(floor, active_skulls)
     Log.info("gameapi: launch request — mission=%s rally=%s difficulty=%s skulls=[%s]",
         floor.mission_id, floor.rally, floor.difficulty,
@@ -477,9 +524,31 @@ function Gameapi.launch_floor(floor, active_skulls)
     local rally_index = ({ Alpha = 0, Bravo = 1, Charlie = 2, Delta = 3 })
         [floor.rally] or 0
 
-    -- One object-array walk for everything this launch needs: the MapInfo
-    -- asset (rally-capable launch), the client lobby data (skull/rally
-    -- property discovery) and any live CampaignSetup (Selected* helpers).
+    local cd = Gameapi.find_campaign_data()
+
+    -- PRIMARY PATH (from the reflection dump): drive the campaign subsystem
+    -- directly, so the rally point and difficulty travel WITH the launch
+    -- instead of being set on a lobby the launch then overwrites.
+    local flow = campaign_flow_subsystem()
+    if flow and cd then
+        local opts = scenario_game_options(diff_index, rally_index,
+            Gameapi.skull_enum_values(active_skulls))
+        local ok, err = pcall(function()
+            return flow:SetAndBeginCampaign(cd, FName(scen), opts)
+        end)
+        Log.discover("launch: SetAndBeginCampaign(%s, %q, {diff=%d, rally=%d}) -> %s",
+            full_name(cd), scen, diff_index, rally_index,
+            ok and "OK" or tostring(err))
+        if ok then return true end
+        Log.discover("launch: subsystem path failed — falling back to the menu call")
+    else
+        Log.discover("launch: campaign flow subsystem %s, campaign data %s",
+            flow and "found" or "MISSING", cd and "found" or "MISSING")
+    end
+
+    -- One object-array walk for the fallback paths: the MapInfo asset
+    -- (rally-capable menu overload), the client lobby data and any live
+    -- CampaignSetup (Selected* helpers).
     local scans = scan_multi({ "MapInfo", "ClientLobbyData", "CampaignSetup" }, 20)
 
     -- Lobby setup via the game's own helpers (signatures confirmed by SIG dump:
@@ -608,8 +677,8 @@ function Gameapi.launch_floor(floor, active_skulls)
             .. "cannot be applied on this path", id_up)
     end
 
-    -- Preferred path: the menu's own LaunchCampaignMap(CampaignData, Scenario).
-    local cd = Gameapi.find_campaign_data()
+    -- Last resort: the menu's own LaunchCampaignMap(CampaignData, Scenario).
+    -- Loads the mission but always at its start (no rally point).
     if cd then
         local ok, err = pcall(function()
             screen:LaunchCampaignMap(cd, FName(scen))
@@ -654,6 +723,108 @@ function Gameapi.resume_remix_save()
     return ok
 end
 
+-- ------------------------------------------------------------ enums
+--
+-- The CXX header dump names the enums (EBlamGameSkulls,
+-- EBlamCampaignDifficultyLevel) but not their members, so the values are read
+-- from the live UEnum objects instead. Resolved values are cached here and
+-- written to the log in a form that can be pasted straight into const.lua.
+local ENUM_PATHS = {
+    skulls     = "/Script/BlamEngine.EBlamGameSkulls",
+    difficulty = "/Script/BlamEngine.EBlamCampaignDifficultyLevel",
+}
+local enum_values = {}   -- kind -> { [NAME] = value }
+
+-- Read a UEnum's members. UE4SS exposes no single guaranteed API for this, so
+-- several read-only approaches are tried and whichever works is used.
+local function read_enum(path)
+    local e = try("find enum " .. path, StaticFindObject, path)
+    if not (e and e:IsValid()) then return nil, "enum object not found" end
+    local out = {}
+
+    -- 1. UE4SS >= 3.0 exposes ForEachName on UEnum objects.
+    local ok = pcall(function()
+        e:ForEachName(function(name, value)
+            out[fstr(name)] = value
+        end)
+    end)
+    if ok and next(out) then return out end
+
+    -- 2. Names array (UEnum::Names is a TArray<TPair<FName,int64>>).
+    out = {}
+    pcall(function()
+        local names = e.Names
+        local n = names and names:GetArrayNum() or 0
+        for i = 1, n do
+            local pair = names[i]
+            local key = fstr(pair.Key or pair.First or pair[1])
+            local val = pair.Value or pair.Second or pair[2]
+            if key then out[key] = val end
+        end
+    end)
+    if next(out) then return out end
+
+    -- 3. Brute-force lookup by value (works when GetNameByValue is exposed).
+    out = {}
+    for v = 0, 63 do
+        local okv, nm = pcall(function() return fstr(e:GetNameByValue(v)) end)
+        if okv and nm and nm ~= "" and not nm:match("^None$")
+            and not nm:match("^%-?%d+$") then
+            out[nm] = v
+        end
+    end
+    if next(out) then return out end
+    return nil, "no readable enum API"
+end
+
+-- Log every enum member. The skull list replaces the guessed SKULL_POOL ids
+-- in const.lua; the difficulty list confirms the Easy/Normal/Heroic/Legendary
+-- ordering the launch call relies on.
+function Gameapi.dump_enums()
+    for kind, path in pairs(ENUM_PATHS) do
+        local vals, err = read_enum(path)
+        if vals then
+            enum_values[kind] = vals
+            local parts = {}
+            for name, v in pairs(vals) do
+                parts[#parts + 1] = string.format("%s=%s", name, tostring(v))
+            end
+            table.sort(parts)
+            Log.discover("ENUM %s (%d): %s", kind, #parts, table.concat(parts, ", "))
+        else
+            Log.discover("ENUM %s: UNREADABLE (%s)", kind, tostring(err))
+        end
+    end
+end
+
+-- Map this mod's skull ids onto real EBlamGameSkulls values. Returns nil until
+-- the enum has been read AND const.lua's ids match real members — callers then
+-- simply omit ActiveSkulls and keep whatever Campaign Remix applied.
+function Gameapi.skull_enum_values(skull_ids)
+    local vals = enum_values.skulls
+    if not vals then return nil end
+    -- Match case-insensitively, ignoring underscores: "grunt_bday" -> "GruntBday".
+    local norm = {}
+    for name, v in pairs(vals) do
+        norm[name:lower():gsub("[^%a%d]", "")] = v
+    end
+    local out, missing = {}, {}
+    for _, id in ipairs(skull_ids) do
+        local key = id:lower():gsub("[^%a%d]", "")
+        if norm[key] then
+            out[#out + 1] = norm[key]
+        else
+            missing[#missing + 1] = id
+        end
+    end
+    if #missing > 0 then
+        Log.discover("skulls: no enum member for [%s] — sending %d of %d",
+            table.concat(missing, ","), #out, #skull_ids)
+    end
+    if #out == 0 then return nil end
+    return out
+end
+
 -- In-mission skull discovery: the FN dump shows a game-state skulls component
 -- (BP_BaseBlamEffect:GetGameStateSkullsComponent, BlamEngineAudioGameSubsystem:
 -- GetActiveSkulls, Pawn OnSkullsAdded/Removed) — meaning skulls live on a
@@ -695,6 +866,7 @@ end
 function Gameapi.discovery_dump()
     Log.discover("==== discovery dump start ====")
     Gameapi.get_build_version()
+    Gameapi.dump_enums()
 
     local probes = {
         "MeteoriteGameUserSettings",
