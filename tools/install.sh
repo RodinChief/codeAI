@@ -68,16 +68,22 @@ if [ -f "$SETTINGS" ]; then
 fi
 
 # --- debug menu Game.ini (user config layer wins over the pak'd defaults) ----
+# This step is a convenience (the debug menu), never a reason to fail the
+# install: the mod itself is already in place by now. Hence the `|| true`
+# guards and the non-fatal warning.
 if [ -d "$(dirname "$WINCFG")" ] || [ -d "$PFX" ]; then
-    mkdir -p "$WINCFG"
+    mkdir -p "$WINCFG" 2>/dev/null || true
     GAME_INI="$WINCFG/Game.ini"
+    # A previous run left this file mode 444, which made the write below fail
+    # with "Permission denied" on every subsequent run. Always restore write
+    # permission first.
+    [ -e "$GAME_INI" ] && chmod u+w "$GAME_INI" 2>/dev/null || true
     if [ -f "$GAME_INI" ] \
         && ! grep -q 'bEnableDebugMenuDefaultShipping' "$GAME_INI"; then
-        chmod u+w "$GAME_INI" 2>/dev/null || true
-        cp "$GAME_INI" "$GAME_INI.bak"
+        cp "$GAME_INI" "$GAME_INI.bak" 2>/dev/null || true
         echo "-- existing Game.ini backed up to Game.ini.bak"
     fi
-    cat > "$GAME_INI" <<'EOF'
+    if cat > "$GAME_INI" <<'EOF' 2>/dev/null
 [/Script/Meteorite.DebugMenuSettings]
 bEnableDebugMenuDefaultShipping=True
 bEnableDebugMenuBetaShipping=True
@@ -86,12 +92,17 @@ bEnableDebugMenuDefaultNonShipping=True
 bEnableDebugMenuBetaNonShipping=True
 bEnableDebugMenuReleaseNonShipping=True
 EOF
-    # Read-only so the game can't stomp it on exit.
-    chmod 444 "$GAME_INI"
-    echo "-- wrote $GAME_INI (read-only; in-game 'G' toggles the debug menu)"
+    then
+        # Read-only so the game can't stomp it on exit.
+        chmod 444 "$GAME_INI" 2>/dev/null || true
+        echo "-- wrote $GAME_INI (read-only; in-game 'G' toggles the debug menu)"
+    else
+        echo "NOTE: could not write $GAME_INI — the debug menu stays off." >&2
+        echo "      The mod itself is installed and works without it." >&2
+    fi
 else
-    echo "WARNING: Wine prefix not found at $PFX — run the game once first," >&2
-    echo "then re-run this script to install the debug-menu Game.ini." >&2
+    echo "NOTE: Wine prefix not found at $PFX — skipping the debug-menu Game.ini." >&2
+    echo "      The mod itself is installed and works without it." >&2
 fi
 
 # --- launch options reminder -------------------------------------------------
@@ -106,10 +117,15 @@ Remaining manual step — Steam launch options:
       https://www.nexusmods.com/halocampaignevolved/mods/53
   Steam > Halo: Campaign Evolved > Properties > Launch Options.
 
-Then launch the game and check:
+Then launch the game. The mod adds a ROGUELIKE row to the main menu:
+select it (click, or hold focus on it for ~1s) to open the submenu.
+Everything is driven from those rows — no keyboard needed.
+
+Check the log if something looks wrong:
   Meteorite/Binaries/Win64/ue4ss/UE4SS.log
   - UE4SS found GUObjectArray            -> fork working
   - grep HRLK UE4SS.log                  -> this mod's output
-  In-game keys: F6 panel · F5 confirm/start · F7 discovery dump
-                F8 exit mode · F9 EMERGENCY SAVE RESTORE
+
+Keyboard extras (optional): F6 log panel · F7 discovery dump
+                            F8 exit mode · F9 EMERGENCY SAVE RESTORE
 EOF
