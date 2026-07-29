@@ -541,17 +541,12 @@ function Gameapi.launch_floor(floor, active_skulls)
     local cd = Gameapi.find_campaign_data()
     if cd and not campaign_data_dumped then
         campaign_data_dumped = true
+        -- Property NAMES only. Reading the asset's ScenarioList and walking it
+        -- crashed the game outright on-device (2026-07-29): it comes back as an
+        -- opaque TrivialObject, both length accessors fail, and the fallback
+        -- walk indexes it anyway — that is a native access violation, which no
+        -- pcall can catch. Unknown UE containers do not get probed blind.
         dump_props(cd, "CampaignData " .. full_name(cd))
-        -- The scenario list is what decides whether a scenario name like "a10"
-        -- is even part of this campaign. Whichever of these fields exists gets
-        -- logged so a refused launch can be told apart from a bad name.
-        for _, prop in ipairs({ "Scenarios", "ScenarioList", "Missions",
-            "CampaignScenarios", "ScenarioNames" }) do
-            local arr = try("read " .. prop, function() return cd[prop] end)
-            if arr ~= nil then
-                Log.discover("CD.%s = %s", prop, describe_container(arr))
-            end
-        end
     end
 
     -- PRIMARY PATH (from the reflection dump): drive the campaign subsystem
@@ -974,15 +969,17 @@ function describe_container(v)
     local n = try("len", function() return #v end)
         or try("GetArrayNum", function() return v:GetArrayNum() end)
     if n then parts[#parts + 1] = "len=" .. tostring(n) end
+    -- Elements are read ONLY when a length accessor worked. Indexing a
+    -- container whose length cannot even be read means guessing at its
+    -- element type, and guessing wrong is an access violation inside the
+    -- engine, which pcall does not survive — it took the whole game down
+    -- on-device (2026-07-29) via an ipairs() walk that used to sit here.
     local elems = {}
-    pcall(function()
-        for i = 1, (tonumber(n) or 0) do
-            elems[#elems + 1] = tostring(v[i])
-        end
-    end)
-    if #elems == 0 then
+    if tonumber(n) then
         pcall(function()
-            for _, e in ipairs(v) do elems[#elems + 1] = tostring(e) end
+            for i = 1, tonumber(n) do
+                elems[#elems + 1] = tostring(v[i])
+            end
         end)
     end
     if #elems > 0 then
