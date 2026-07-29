@@ -282,9 +282,13 @@ local function on_menu_row(text)
     push_rows()
 end
 
--- F5 keeps working as a shortcut for "the obvious thing on this screen".
+-- F5 is the keyboard stand-in for pressing a button. Inside the roguelike
+-- menu it presses whatever row is highlighted — the same thing A or a mouse
+-- click does — so there is a way through even on a build where neither reaches
+-- the rows. Outside it, it still means "the obvious thing on this screen".
 local function primary_action()
     if not enabled then return end
+    if Menuinject.activate_focused() then return end
     if Ui.mode == "confirm_new_run" then
         on_menu_row("▶ YES — START THE RUN")
     elseif Ui.mode == "summary" then

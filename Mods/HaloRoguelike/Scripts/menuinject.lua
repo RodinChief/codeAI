@@ -14,17 +14,23 @@
 -- carry meaning (set by ui.compact_lines): "▶ " = selectable action,
 -- "◀ " = back, anything else = informational.
 --
--- Activation: cloned rows are NOT part of the menu's MainButtonContainer
--- button group (confirmed by the F7 UFunction dump — clicks route through
--- BndEvt__..MainButtonContainer.. delegates), so pressing A on them often
--- does nothing. Two paths, either works:
---   1. click hooks on /Script/CommonUI.CommonButtonBase:HandleButtonClicked
---      and :HandleButtonPressed (fire for mouse/touch clicks);
---   2. focus dwell: holding gamepad focus (or mouse hover) on an actionable
---      row for ~1s activates it. Focus detection is confirmed working
---      on-device, so the Steam Deck always has a pure-controller path.
+-- Activation: rows are PRESSED, never hovered into firing. They are added
+-- through HaloUIButtonContainer's own AddChildToButtonContainer, which makes
+-- them real members of the menu's button group, so A / Enter / a mouse click
+-- reaches them through the hooks on
+-- /Script/CommonUI.CommonButtonBase:HandleButtonClicked and :HandleButtonPressed
+-- exactly like any other menu entry. One physical press fires both handlers,
+-- hence PRESS_GUARD_TICKS.
+--
+-- Earlier builds added rows with a plain AddChild, which left them outside the
+-- button group with no press reaching them, and activated on focus dwell
+-- instead — resting on a row fired it, which is not how a menu behaves. That
+-- path survives only behind config.activate_on_focus_dwell (default off) for a
+-- build where a press turns out not to arrive at all; the F5 keybind is the
+-- other way out.
 
 local Log = require("log")
+local Config = require("config")
 
 local Menuinject = {}
 
@@ -67,10 +73,11 @@ local CANDIDATES = {
     entry_label_widgets = { "NameText", "Label", "Text", "ButtonText" },
 }
 
--- Dwell activation: ticks of the 250ms watcher that focus must stay on a row
--- before it fires. ROGUELIKE opens a submenu (cheap) so it opens faster.
-local DWELL_OPEN_TICKS = 3   -- ~0.75s on the ROGUELIKE entry
-local DWELL_ROW_TICKS  = 4   -- ~1s on a ▶/◀ row
+-- Ticks of the 250ms watcher during which no further activation is accepted.
+-- One physical press fires BOTH hooked handlers (Pressed on the way down,
+-- Clicked on the way up), so without this a single press counts twice.
+local PRESS_GUARD_TICKS = 2  -- ~0.5s
+local press_guard = 0
 
 local injected = nil       -- our injected ROGUELIKE entry widget, once created
 local on_activate = nil    -- callback: roguelike submenu was opened
@@ -195,6 +202,27 @@ local function set_label(entry, text, quiet)
     return false
 end
 
+-- --------------------------------------------------------- child helpers
+
+local function children_of(parent)
+    local out = {}
+    local n = try(function() return parent:GetChildrenCount() end) or 0
+    for i = 0, n - 1 do
+        local ch = try(function() return parent:GetChildAt(i) end)
+        if is_valid(ch) then out[#out + 1] = ch end
+    end
+    return out
+end
+
+-- Append a widget. The container's own AddChildToButtonContainer is preferred
+-- (it is how HaloUIButtonContainer registers a row with its button group, per
+-- the on-device function dump); AddChild is the UPanelWidget fallback.
+local function add_child(parent, w)
+    return try(function() parent:AddChildToButtonContainer(w) return true end)
+        or try(function() parent:AddChild(w) return true end)
+        or false
+end
+
 -- ------------------------------------------------------------- submenu
 
 -- Address set of the mod's own widgets (ROGUELIKE entry + rows).
@@ -225,13 +253,24 @@ local function apply_pending_rows()
                 return wbl:Create(cached_screen, cached_template:GetClass(), owner)
             end) or nil
             if not row then return end
-            try(function() cached_parent:AddChild(row) end)
-            try(function() row:SetIsFocusable(true) end)
+            -- Added through the container's own call, so the row becomes a
+            -- real member of the menu's button group: that is what makes A /
+            -- Enter / a mouse click activate it, instead of needing the
+            -- hover-to-fire hack.
+            add_child(cached_parent, row)
             status_rows[i] = row
         end
         set_label(row, lines[i], true)
         row_texts[i] = lines[i]
         try(function() row:SetVisibility(0) end) -- 0 = Visible
+        -- Only ▶/◀ rows are buttons. The rest are text — floor descriptions,
+        -- skull lists, separators — and must not be landed on while stepping
+        -- through the menu, or half the presses hit something that does
+        -- nothing.
+        local first = lines[i]:sub(1, #"▶")
+        local actionable = (first == "▶" or first == "◀")
+        try(function() row:SetIsFocusable(actionable) end)
+        try(function() row:SetIsInteractionEnabled(actionable) end)
     end
     for i = #lines + 1, #status_rows do
         local row = status_rows[i]
@@ -261,6 +300,15 @@ local function open_submenu()
     end
     last_status = nil -- force row refresh
     apply_pending_rows()
+    -- Land the highlight on the first real button. Without this the focus is
+    -- left on a row that was just collapsed, and the first press goes nowhere.
+    for i, row in ipairs(status_rows) do
+        local t = row_texts[i]
+        if t and (t:sub(1, #"▶") == "▶" or t:sub(1, #"◀") == "◀") then
+            try(function() row:SetFocus() end)
+            break
+        end
+    end
     Log.info("menuinject: submenu OPENED (%d game rows hidden, %d mod rows)",
         #saved_vis, pending_lines and #pending_lines or 0)
 end
@@ -275,9 +323,17 @@ local function close_submenu()
     end
     saved_vis = {}
     for _, row in ipairs(status_rows) do
-        if is_valid(row) then try(function() row:SetVisibility(1) end) end
+        if is_valid(row) then
+            try(function() row:SetIsFocusable(false) end)
+            try(function() row:SetVisibility(1) end)
+        end
     end
+    row_texts = {}
     last_status = nil
+    focused_text = nil
+    -- Hand the highlight back to the ROGUELIKE entry rather than leaving it on
+    -- a row that no longer exists on screen.
+    if is_valid(injected) then try(function() injected:SetFocus() end) end
     Log.info("menuinject: submenu CLOSED (main menu restored)")
 end
 
@@ -295,7 +351,8 @@ end
 -- ------------------------------------------------------------- activation
 
 local function activate_open()
-    if suspend_ticks > 0 then return end
+    if suspend_ticks > 0 or press_guard > 0 then return end
+    press_guard = PRESS_GUARD_TICKS
     ExecuteInGameThread(function()
         -- Callback FIRST: it picks the screen and pushes the matching rows, so
         -- the submenu opens already showing them. Opening first meant the rows
@@ -307,11 +364,12 @@ local function activate_open()
 end
 
 local function activate_row(i)
-    if suspend_ticks > 0 then return end
+    if suspend_ticks > 0 or press_guard > 0 then return end
     local text = row_texts[i]
     if not text then return end
     local first = text:sub(1, #"▶")
     if first ~= "▶" and first ~= "◀" then return end -- informational row
+    press_guard = PRESS_GUARD_TICKS
     Log.info("menuinject: row activated: %s", text)
     ExecuteInGameThread(function()
         if first == "◀" then close_submenu() end
@@ -364,29 +422,78 @@ local function hook_clicks()
     end
     click_hooked = any
     if not any then
-        Log.discover("menuinject: no click hook resolved — focus dwell is the "
-            .. "only activation path")
+        Log.warn("menuinject: no click hook resolved — rows can only be "
+            .. "activated with the %s key", Config.keys.primary_action)
     end
 end
 
--- Focus/hover watcher: the activation path that is CONFIRMED working on the
--- Steam Deck. Holding focus (gamepad) or hover (mouse) on the ROGUELIKE entry
--- or on a ▶/◀ row for the dwell time activates it.
+-- Focus watcher. Its job is to know WHICH row is highlighted — that drives the
+-- detail panel beside the floor list, exactly like the game's own Mission
+-- Select describing the mission you are pointing at.
+--
+-- It does NOT activate anything by default. Rows are members of the game's own
+-- button container, so A / Enter / a mouse click presses them through the
+-- CommonButtonBase hooks like any other menu entry. Resting on a row used to
+-- fire it, which is not how a menu behaves; that path now only exists behind
+-- config.activate_on_focus_dwell, as a fallback for a build where pressing a
+-- row turns out to do nothing at all.
 local function focused(widget)
     return try(function() return widget:IsHovered() end)
         or try(function() return widget:HasKeyboardFocus() end)
         or try(function() return widget:HasFocusedDescendants() end)
 end
 
-local dwell_target, dwell_ticks, dwell_fired = nil, 0, false
+-- Which of our widgets holds focus: "entry" | row index | nil.
+local function focus_target()
+    if focused(injected) then return "entry" end
+    if submenu_open then
+        for i, row in ipairs(status_rows) do
+            if row_texts[i] and is_valid(row) and focused(row) then return i end
+        end
+    end
+    return nil
+end
+
+local dwell_target, dwell_ticks = nil, 0
 local dwell_text, dwell_gen = nil, 0
--- The row that just fired. It cannot fire again until focus moves off it,
--- which is what keeps one activation from cascading into the next as the
--- screen behind the focus is redrawn.
+-- The row that last fired. It cannot fire again until focus leaves it, so one
+-- activation never cascades into the next as the screen behind it is redrawn.
 local locked_target = nil
+
+local function fire(target)
+    if target == "entry" then
+        if not submenu_open then
+            Log.info("menuinject: ROGUELIKE pressed — opening submenu")
+            activate_open()
+        end
+    elseif type(target) == "number" then
+        activate_row(target)
+    end
+end
+
+-- Press the row the player is pointing at. The keyboard fallback (see
+-- main.lua) calls this, so there is always a way in even if neither the click
+-- hooks nor the button group deliver a press on this build.
+function Menuinject.activate_focused()
+    local target = focus_target()
+    if target == nil then return false end
+    if type(target) == "number" then
+        -- An informational row has nothing to press; report that so the
+        -- caller's own fallback still gets a turn.
+        local text = row_texts[target]
+        local first = text and text:sub(1, #"▶")
+        if first ~= "▶" and first ~= "◀" then return false end
+    end
+    locked_target = target
+    fire(target)
+    return true
+end
+
 local function start_watcher()
     if watcher_started then return end
     watcher_started = true
+    local dwell_ticks_needed =
+        math.max(1, math.ceil((Config.focus_dwell_seconds or 1.0) / 0.25))
     pcall(function()
         LoopAsync(250, function()
             if not is_valid(injected) then
@@ -394,60 +501,37 @@ local function start_watcher()
                 reset_all()
                 return true -- attempt loop re-injects on the next pass
             end
+            if press_guard > 0 then press_guard = press_guard - 1 end
             if suspend_ticks > 0 then
                 suspend_ticks = suspend_ticks - 1
-                dwell_target, dwell_ticks, dwell_fired = nil, 0, false
+                dwell_target, dwell_ticks = nil, 0
                 return false
             end
-            -- Which of our widgets has focus right now?
-            local target = nil
-            if focused(injected) then
-                target = "entry"
-            elseif submenu_open then
-                for i, row in ipairs(status_rows) do
-                    if row_texts[i] and is_valid(row) and focused(row) then
-                        target = i
-                        break
-                    end
-                end
-            end
+            local target = focus_target()
             local text = (type(target) == "number") and row_texts[target] or nil
-            -- Dwell only counts while the SAME row keeps the SAME text and the
-            -- row set has not been re-rendered underneath it. Any of those
-            -- changing restarts the count — that is what stops a screen switch
-            -- from activating whatever row slid under the player's focus.
+
             if target ~= dwell_target or text ~= dwell_text
                 or rows_generation ~= dwell_gen then
                 -- Moving off a row is what unlocks it again; a row whose text
-                -- merely changed stays locked, so activating it never chains
-                -- into activating whatever replaces it.
+                -- merely changed stays locked.
                 if target ~= dwell_target then locked_target = nil end
-                dwell_target, dwell_ticks, dwell_fired = target, 0, false
+                dwell_target, dwell_ticks = target, 0
                 dwell_text, dwell_gen = text, rows_generation
                 -- Report the highlighted row so the UI can fill its detail
-                -- panel, the way the game's own Mission Select describes the
-                -- mission you are pointing at.
+                -- panel.
                 if text ~= focused_text then
                     focused_text = text
                     if on_row_focus then
                         ExecuteInGameThread(function() on_row_focus(text) end)
                     end
                 end
-            elseif target ~= nil and not dwell_fired then
+            elseif Config.activate_on_focus_dwell and target ~= nil
+                and target ~= locked_target then
+                -- Fallback only: rest-to-activate. Off by default.
                 dwell_ticks = dwell_ticks + 1
-                local need = (target == "entry") and DWELL_OPEN_TICKS
-                    or DWELL_ROW_TICKS
-                if dwell_ticks >= need and target ~= locked_target then
-                    dwell_fired = true
+                if dwell_ticks >= dwell_ticks_needed then
                     locked_target = target
-                    if target == "entry" then
-                        if not submenu_open then
-                            Log.info("menuinject: ROGUELIKE focused — opening submenu")
-                            activate_open()
-                        end
-                    else
-                        activate_row(target)
-                    end
+                    fire(target)
                 end
             end
             return false
@@ -510,27 +594,6 @@ function Menuinject.resume()
         suspend_ticks = 0
         Log.info("menuinject: activation resumed")
     end
-end
-
--- ------------------------------------------------------------- ordering
-
-local function children_of(parent)
-    local out = {}
-    local n = try(function() return parent:GetChildrenCount() end) or 0
-    for i = 0, n - 1 do
-        local ch = try(function() return parent:GetChildAt(i) end)
-        if is_valid(ch) then out[#out + 1] = ch end
-    end
-    return out
-end
-
--- Append a widget. The container's own AddChildToButtonContainer is preferred
--- (it is how HaloUIButtonContainer registers a row with its button group, per
--- the on-device function dump); AddChild is the UPanelWidget fallback.
-local function add_child(parent, w)
-    return try(function() parent:AddChildToButtonContainer(w) return true end)
-        or try(function() parent:AddChild(w) return true end)
-        or false
 end
 
 -- Move `clone` to sit directly below `template` (CAMPAIGN REMIX).

@@ -19,6 +19,19 @@ Config.include_bonus_missions = false
 -- always rolls `floor5` skulls on top of everything accumulated.
 Config.skull_roll = { min = 1, max = 2, floor5 = 2 }
 
+-- Activate a roguelike menu row by RESTING on it, instead of pressing it.
+--
+-- Off, because resting on a row and having it fire is not what a menu does.
+-- Rows now join the game's own button container, so A / Enter / a mouse click
+-- activates them the way every other menu entry works.
+--
+-- Only turn this back on if pressing a roguelike row does nothing at all on
+-- your build — it is the fallback that needs no working press at all.
+Config.activate_on_focus_dwell = false
+
+-- Seconds of resting on a row before it fires, when the above is on.
+Config.focus_dwell_seconds = 1.0
+
 -- Keybinds (UE4SS Key enum names; see main.lua).
 Config.keys = {
     toggle_overlay   = "F6",  -- open/close the roguelike panel

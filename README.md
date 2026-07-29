@@ -59,7 +59,7 @@ Details and troubleshooting: [`docs/INSTALL.md`](docs/INSTALL.md).
 | Key | Action |
 |---|---|
 | `F6` | Open/close the roguelike panel |
-| `F5` | Primary action: confirm warning · new run · start floor · close summary |
+| `F5` | Presses the highlighted ROGUELIKE row; outside that menu, the primary action for the screen |
 | `F7` | Write a discovery report to `UE4SS.log` |
 | `F8` | Exit mode: abandon run, restore save, clear modifiers |
 | `F9` | **Emergency save restore** (works even when the mod is disabled) |
