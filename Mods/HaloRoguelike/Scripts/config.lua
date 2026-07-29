@@ -19,6 +19,13 @@ Config.include_bonus_missions = false
 -- always rolls `floor5` skulls on top of everything accumulated.
 Config.skull_roll = { min = 1, max = 2, floor5 = 2 }
 
+-- Log which skull gameplay tags the running mission actually has. Read-only
+-- and safe, but it is reflection on a live component, so it can be switched
+-- off. Setting skulls is NOT possible from Lua on this build: building a
+-- gameplay tag from a Lua table crashes the game, and every other route needs
+-- one. See docs/DISCOVERY.md.
+Config.report_skull_tags = true
+
 -- Activate a roguelike menu row by RESTING on it, instead of pressing it.
 --
 -- Off, because resting on a row and having it fire is not what a menu does.

@@ -365,9 +365,6 @@ local function finish_init(build_ok, build)
     -- objects: the CXX header dump names these enums but not their members,
     -- and the launch call needs the real values.
     pcall(Gameapi.dump_enums)
-    -- Which prefix skull gameplay tags live under. Answered by the tag
-    -- registry, so it resolves here in the menu rather than needing a mission.
-    pcall(Gameapi.probe_skull_tag_prefix)
     Gameapi.on_mission_complete(handle_floor_complete)
     Gameapi.on_player_death(handle_death)
 
@@ -468,9 +465,6 @@ end
 -- changes: closes the submenu so no mod row is left focusable over gameplay,
 -- and kicks the one-off in-mission skull discovery.
 local skull_dump_done = false
--- Set once a skull write has been verified for the current mission, so the
--- later retry passes become no-ops.
-local skulls_applied = false
 function watch_world()
     local world = Gameapi.current_world_name()
     if not world or world == last_world then return end
@@ -489,29 +483,18 @@ function watch_world()
     if entering_mission then
         launch_pending = false
         mission_seen_since_launch = true
-        -- Skulls are applied here, not at launch: in a live mission they are
-        -- gameplay TAGS on the skulls component, not the enum values the
-        -- launch options struct takes (confirmed on-device 2026-07-29).
+        -- Report which skulls the mission actually got, once it has settled.
+        -- Reporting, not setting: forcing a skull needs a gameplay tag built
+        -- from Lua, and that crashes the game (see gameapi.lua).
         if State.run and State.run.floor_status == State.FLOOR.IN_MISSION then
             local ids = State.active_skulls()
             local values = Gameapi.skull_enum_values(ids)
-            -- Written more than once: the mission is still settling at 5s, and
-            -- if the game re-applies its own skull set after ours the later
-            -- passes take it back. Stops as soon as a pass verifies.
-            skulls_applied = false
-            for _, delay in ipairs({ 5000, 15000, 30000 }) do
-                pcall(function()
-                    LoopAsync(delay, function()
-                        if skulls_applied then return true end
-                        if not (State.run and State.run.floor_status
-                            == State.FLOOR.IN_MISSION) then return true end
-                        local ok, verified =
-                            pcall(Gameapi.apply_skulls_in_mission, values, ids)
-                        if ok and verified then skulls_applied = true end
-                        return true
-                    end)
+            pcall(function()
+                LoopAsync(10000, function()
+                    pcall(Gameapi.apply_skulls_in_mission, values, ids)
+                    return true
                 end)
-            end
+            end)
         end
     end
     if entering_mission and not skull_dump_done then
