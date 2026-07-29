@@ -387,7 +387,23 @@ function watch_world()
     pcall(Menuinject.close)
 
     local entering_mission = world:find("/Solo/", 1, true) ~= nil
-    if entering_mission then mission_seen_since_launch = true end
+    if entering_mission then
+        mission_seen_since_launch = true
+        -- The options-struct TSet does not carry the skulls (confirmed
+        -- on-device), so force them onto the live mission a few seconds after
+        -- the world is up, once the game state exists.
+        if State.run and State.run.floor_status == State.FLOOR.IN_MISSION then
+            local wanted = Gameapi.skull_enum_values(State.active_skulls())
+            if wanted then
+                pcall(function()
+                    LoopAsync(5000, function()
+                        pcall(Gameapi.apply_skulls_in_mission, wanted)
+                        return true
+                    end)
+                end)
+            end
+        end
+    end
     if entering_mission and not skull_dump_done then
         -- Let the mission settle, then dump the skull component once.
         skull_dump_done = true

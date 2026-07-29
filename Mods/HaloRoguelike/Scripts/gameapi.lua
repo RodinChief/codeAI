@@ -900,6 +900,152 @@ function Gameapi.skull_enum_values(skull_ids)
     return out
 end
 
+-- ------------------------------------------------------------ skull writing
+--
+-- Difficulty and InsertionPoint travel fine inside the options struct, but
+-- ActiveSkulls is a TSet<EBlamGameSkulls> and a plain Lua array does not
+-- populate it: on-device the launch reported OK with values [0,38,37,31,7]
+-- yet the mission ran with Iron + BlackEye, i.e. Campaign Remix's own random
+-- roll rather than this mod's set.
+--
+-- So the set is (also) written in-mission, straight onto the live
+-- BlamSkullsGameStateComponent, and every attempt is verified by reading the
+-- field back. Whatever shape succeeds shows up in the log as "VERIFIED".
+
+-- Describe an unknown container value: Lua type, length via whichever
+-- accessor exists, and its elements when they can be read.
+local function describe_container(v)
+    if v == nil then return "nil" end
+    local t = type(v)
+    local parts = { t }
+    local n = try("len", function() return #v end)
+        or try("GetArrayNum", function() return v:GetArrayNum() end)
+    if n then parts[#parts + 1] = "len=" .. tostring(n) end
+    local elems = {}
+    pcall(function()
+        for i = 1, (tonumber(n) or 0) do
+            elems[#elems + 1] = tostring(v[i])
+        end
+    end)
+    if #elems == 0 then
+        pcall(function()
+            for _, e in ipairs(v) do elems[#elems + 1] = tostring(e) end
+        end)
+    end
+    if #elems > 0 then
+        parts[#parts + 1] = "{" .. table.concat(elems, ",") .. "}"
+    end
+    -- Method names, so a usable Add/Empty API shows up in the log if present.
+    local mt = try("getmetatable", function() return getmetatable(v) end)
+    if type(mt) == "table" then
+        local names = {}
+        pcall(function()
+            for k in pairs(mt.__index or mt) do
+                if type(k) == "string" then names[#names + 1] = k end
+            end
+        end)
+        table.sort(names)
+        if #names > 0 then
+            parts[#parts + 1] = "methods=[" .. table.concat(names, ",") .. "]"
+        end
+    end
+    return table.concat(parts, " ")
+end
+
+-- Live (non-CDO) skulls component for the current mission.
+local function skulls_component()
+    local all = try("FindAllOf(BlamSkullsGameStateComponent)", FindAllOf,
+        "BlamSkullsGameStateComponent")
+    if not all then return nil end
+    for _, obj in ipairs(all) do
+        local ok, valid = pcall(function() return obj:IsValid() end)
+        if ok and valid and not full_name(obj):find("Default__", 1, true) then
+            return obj
+        end
+    end
+    return nil
+end
+
+-- Try to force the run's skulls onto the live mission. Returns true only when
+-- a read-back confirms the values actually landed.
+function Gameapi.apply_skulls_in_mission(values)
+    if not values or #values == 0 then return false end
+    local comp = skulls_component()
+    if not comp then
+        Log.discover("skullwrite: no live BlamSkullsGameStateComponent found")
+        return false
+    end
+    Log.discover("skullwrite: component %s", full_name(comp))
+    local before = try("read ActiveSkulls", function() return comp.ActiveSkulls end)
+    Log.discover("skullwrite: ActiveSkulls BEFORE = %s", describe_container(before))
+
+    -- Does the read-back contain every value we want?
+    local function verify()
+        local after = try("read ActiveSkulls", function() return comp.ActiveSkulls end)
+        local desc = describe_container(after)
+        local hit = 0
+        for _, want in ipairs(values) do
+            if desc:find("," .. want .. ",", 1, true)
+                or desc:find("{" .. want .. ",", 1, true)
+                or desc:find("," .. want .. "}", 1, true)
+                or desc:find("{" .. want .. "}", 1, true) then
+                hit = hit + 1
+            end
+        end
+        return hit, desc
+    end
+
+    -- Shape 1: plain Lua array of enum values.
+    local attempts = {
+        { desc = "array", build = function() return values end },
+        -- Shape 2: set-style table (value -> true), which some marshallers
+        -- expect for TSet.
+        { desc = "keyed table", build = function()
+            local t = {}
+            for _, v in ipairs(values) do t[v] = true end
+            return t
+        end },
+        -- Shape 3: reuse a real TSet produced by the game, mutated in place
+        -- if it exposes an Add-style method.
+        { desc = "game-built set", build = function()
+            local bpfl = try("find BPFL", StaticFindObject,
+                BPFL_PATH:gsub("BPFL_CampaignMenuHelpers_C$",
+                    "Default__BPFL_CampaignMenuHelpers_C"))
+            if not (bpfl and bpfl:IsValid()) then return nil end
+            local out = {}
+            pcall(function() bpfl:GetRemixSkullsSet(comp, out) end)
+            local set = out.RemixSkull or out[1]
+            if set == nil then for _, v in pairs(out) do set = v break end end
+            if set == nil then return nil end
+            Log.discover("skullwrite: game set looks like %s", describe_container(set))
+            for _, v in ipairs(values) do
+                pcall(function() set:Add(v) end)
+            end
+            return set
+        end },
+    }
+
+    for _, a in ipairs(attempts) do
+        local payload = a.build()
+        if payload ~= nil then
+            local ok, err = pcall(function() comp.ActiveSkulls = payload end)
+            local hit, desc = verify()
+            Log.discover("skullwrite: %s -> write=%s, %d/%d present, now = %s",
+                a.desc, ok and "ok" or tostring(err), hit, #values, desc)
+            if hit == #values then
+                Log.info("skullwrite: VERIFIED via %s — skulls forced in-mission",
+                    a.desc)
+                return true
+            end
+        else
+            Log.discover("skullwrite: %s -> payload unavailable", a.desc)
+        end
+    end
+    Log.warn("skullwrite: no write shape landed; the game keeps its own skulls "
+        .. "(see the shapes above for which came closest)")
+    return false
+end
+
 -- In-mission skull discovery: the FN dump shows a game-state skulls component
 -- (BP_BaseBlamEffect:GetGameStateSkullsComponent, BlamEngineAudioGameSubsystem:
 -- GetActiveSkulls, Pawn OnSkullsAdded/Removed) — meaning skulls live on a
