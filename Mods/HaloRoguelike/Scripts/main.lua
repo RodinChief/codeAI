@@ -32,6 +32,13 @@ local expect_spawn_event = false
 -- Hook fired only for the first world on-device.
 local last_world = nil
 
+-- Set the moment a mission world appears after a launch, cleared when a
+-- launch is issued. The watchdog checks THIS rather than "is a mission world
+-- loaded right now": on-device the mission loaded fine, the player finished
+-- with it and returned to the menu, and the 45s check then wrongly declared
+-- the launch failed.
+local mission_seen_since_launch = false
+
 -- ------------------------------------------------------------- floor flow
 
 local function handle_run_ended()
@@ -97,6 +104,7 @@ local function start_current_floor()
     end
 
     local skulls = State.active_skulls()
+    mission_seen_since_launch = false
     local ok, err = Gameapi.launch_floor(fl, skulls)
     if ok then
         Ui.set_notice(nil)
@@ -115,10 +123,10 @@ local function start_current_floor()
                     and State.run.floor_status == State.FLOOR.IN_MISSION) then
                     return true
                 end
-                local in_mission = Gameapi.in_mission_world()
-                if in_mission == false then
-                    Log.warn("main: launch reported OK but no mission world is "
-                        .. "loaded after 45s — reverting floor to briefing")
+                if not mission_seen_since_launch
+                    and Gameapi.in_mission_world() == false then
+                    Log.warn("main: launch reported OK but no mission world "
+                        .. "ever loaded within 45s — reverting floor to briefing")
                     Gameapi.distrust_campmenu_launch()
                     State.run.floor_status = State.FLOOR.BRIEFING
                     State.save()
@@ -379,6 +387,7 @@ function watch_world()
     pcall(Menuinject.close)
 
     local entering_mission = world:find("/Solo/", 1, true) ~= nil
+    if entering_mission then mission_seen_since_launch = true end
     if entering_mission and not skull_dump_done then
         -- Let the mission settle, then dump the skull component once.
         skull_dump_done = true

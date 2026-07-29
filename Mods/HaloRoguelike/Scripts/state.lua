@@ -60,6 +60,18 @@ function State.load()
         Log.error("state: corrupt run.json (%s); ignoring", tostring(err))
         return false
     end
+    -- Runs generated before the skull pool was rebuilt from the real game enum
+    -- carry ids the game does not know ("grunt_bday"), which silently dropped
+    -- skulls at launch. Such a run cannot be repaired — discard it so a fresh
+    -- one gets rolled from the current content.
+    if (doc.content_version or 1) ~= Const.CONTENT_VERSION then
+        Log.warn("state: run %s was generated with content v%s but this build "
+            .. "is v%d — discarding it; start a new run",
+            tostring(doc.seed), tostring(doc.content_version or 1),
+            Const.CONTENT_VERSION)
+        State.run = nil
+        return false
+    end
     State.run = doc
     Log.info("state: loaded run %s (status=%s floor=%d deaths=%d)",
         doc.seed or "?", doc.status or "?", doc.current_floor or 0, doc.deaths or 0)
@@ -83,6 +95,7 @@ function State.new_run(seed_string, backup_id)
     local gen = Rungen.generate(seed_string)
     State.run = {
         version       = 1,
+        content_version = Const.CONTENT_VERSION,
         seed          = gen.seed,
         floors        = gen.floors,
         status        = State.STATUS.ACTIVE,

@@ -8,6 +8,10 @@ from `Gameapi.dump_enums()` (`ENUM` lines in UE4SS.log).
 
 56 real members (plus `Num`, `None=255`, `_MAX=256`).
 
+Every real member is used: 3 mandatory, 47 rollable, 3 visibility modifiers.
+Only the three `Custom*` slots — the game's empty custom-skull placeholders —
+are left out.
+
 | Value | Member | Used by this mod |
 |---:|---|---|
 | 0 | Iron | mandatory |
@@ -21,27 +25,27 @@ from `Gameapi.dump_enums()` (`ENUM` lines in UE4SS.log).
 | 8 | Mythic | pool |
 | 9 | Assassin | pool |
 | 10 | Blind | pool |
-| 11 | Cowbell | excluded (fun) |
-| 12 | GruntBirthdayParty | excluded (fun) |
-| 13 | IWHBYD | excluded (dialogue) |
+| 11 | Cowbell | pool |
+| 12 | GruntBirthdayParty | pool |
+| 13 | IWHBYD | pool |
 | 14 | CustomRed | excluded (placeholder) |
 | 15 | CustomYellow | excluded (placeholder) |
 | 16 | CustomBlue | excluded (placeholder) |
-| 17 | Angry | excluded (uncertain effect) |
-| 18 | Bandana | excluded (helps the player) |
-| 19 | BondedPair | excluded (uncertain effect) |
+| 17 | Angry | pool |
+| 18 | Bandana | pool |
+| 19 | BondedPair | pool |
 | 20 | Boom | pool |
-| 21 | Envy | excluded (helps the player) |
+| 21 | Envy | pool |
 | 22 | EyePatch | pool |
 | 23 | Foreign | pool |
-| 24 | Ghost | excluded (uncertain effect) |
+| 24 | Ghost | pool |
 | 25 | GruntFuneral | pool |
 | 26 | Jacked | pool |
 | 27 | Malfunction | pool |
 | 28 | Masterblaster | pool |
-| 29 | Pinata | excluded (helps the player) |
+| 29 | Pinata | pool |
 | 30 | Recession | pool |
-| 31 | Scarab | excluded (helps the player) |
+| 31 | Scarab | pool |
 | 32 | SoAngry | pool |
 | 33 | Swarm | pool |
 | 34 | ThatsJustWrong | pool |
@@ -54,7 +58,7 @@ from `Gameapi.dump_enums()` (`ENUM` lines in UE4SS.log).
 | 41 | LightsOut | visibility modifier |
 | 42 | Riskrun | pool |
 | 43 | Pop | pool |
-| 44 | Armistice | mandatory |
+| 44 | Armistice | pool |
 | 45 | EnduranceSpec | pool |
 | 46 | GiveAndTake | pool |
 | 47 | StowAndGrow | pool |
@@ -65,7 +69,7 @@ from `Gameapi.dump_enums()` (`ENUM` lines in UE4SS.log).
 | 52 | JohnnyAmmoTree | pool |
 | 53 | Leadhead | pool |
 | 54 | Efficient | pool |
-| 55 | ThirdPerson | excluded (camera option) |
+| 55 | ThirdPerson | pool |
 
 Members are returned fully qualified — `EBlamGameSkulls::Iron`, not `Iron`.
 `Gameapi.skull_enum_values` strips the `EnumName::` prefix before matching;

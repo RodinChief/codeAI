@@ -99,6 +99,40 @@ for _, v in ipairs(Const.VISIBILITY_MODIFIERS) do
     end
 end
 
+-- Every skull the game can activate must be accounted for exactly once:
+-- mandatory, rollable, or a visibility modifier. This list is the real
+-- /Script/BlamGlue.EBlamGameSkulls member set read on-device (see
+-- discovery/dumps/enums.md); a typo in const.lua would otherwise only surface
+-- as a silently dropped skull at launch.
+local REAL_SKULL_ENUM = [[Iron BlackEye ToughLuck Catch Fog Famine Thunderstorm
+Tilt Mythic Assassin Blind Cowbell GruntBirthdayParty IWHBYD CustomRed
+CustomYellow CustomBlue Angry Bandana BondedPair Boom Envy EyePatch Foreign
+Ghost GruntFuneral Jacked Malfunction Masterblaster Pinata Recession Scarab
+SoAngry Swarm ThatsJustWrong TheyComeBack BootsOffTheGround Adaptation Reload
+SporeVisibility NightVision LightsOut Riskrun Pop Armistice EnduranceSpec
+GiveAndTake StowAndGrow HipFire Temperamental FloorIsLava Magnified
+JohnnyAmmoTree Leadhead Efficient ThirdPerson]]
+
+local real_skulls, claimed = {}, {}
+for w in REAL_SKULL_ENUM:gmatch("%S+") do real_skulls[w] = true end
+local function claim_skull(id, where)
+    check(real_skulls[id], "const: " .. where .. " id exists in the game enum (" .. id .. ")")
+    check(not claimed[id], "const: id claimed only once (" .. id .. ")")
+    claimed[id] = true
+end
+for _, s in ipairs(Const.MANDATORY_SKULLS) do claim_skull(s.id, "mandatory") end
+for _, s in ipairs(Const.SKULL_POOL) do claim_skull(s.id, "pool") end
+for _, v in ipairs(Const.VISIBILITY_MODIFIERS) do
+    if v.skull then claim_skull(v.skull, "visibility") end
+end
+-- Only the game's three empty custom-skull slots may be left out.
+for id in pairs(real_skulls) do
+    if not claimed[id] then
+        check(id:match("^Custom") ~= nil,
+            "const: unused enum member is a Custom slot, not a real skull (" .. id .. ")")
+    end
+end
+
 local function validate_run(run, seed)
     check(#run.floors == 5, seed .. ": 5 floors")
     local mission_seen, alpha_count = {}, 0

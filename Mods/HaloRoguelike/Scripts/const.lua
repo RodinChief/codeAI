@@ -18,6 +18,12 @@ Const.KNOWN_BUILDS = {
     ["5.5.4-2026.06.26.1097863.1-Rel-i343-Meteorite-2606-CU2"] = true,
 }
 
+-- Bumped whenever the skull pool, mission list or visibility list changes.
+-- A saved run generated under an older version references ids that may no
+-- longer exist (e.g. the pre-enum "grunt_bday"), so state.load discards it
+-- rather than carrying phantom skulls into a launch.
+Const.CONTENT_VERSION = 2
+
 Const.RALLY_POINTS = { "Alpha", "Bravo", "Charlie", "Delta" }
 
 -- 13 campaign missions: 10 original CE + 3 prequel/bonus.
@@ -60,26 +66,27 @@ Const.DIFFICULTY_LADDER = {
 -- keep matching the enum spelling.
 --
 -- Mandatory skulls, active for the entire run.
--- Adaptation / Reload / Armistice come free with Campaign Remix (§5 of the
--- brief); the mod itself only has to force Iron.
 Const.MANDATORY_SKULLS = {
-    { id = "Iron",       name = "Iron",       desc = "Death restarts the rally point",        via = "mod"   },
-    { id = "Adaptation", name = "Adaptation", desc = "Randomises enemy factions",             via = "remix" },
-    { id = "Reload",     name = "Reload",     desc = "Randomises pre-placed weapons",         via = "remix" },
-    { id = "Armistice",  name = "Armistice",  desc = "Enemy factions never fight each other", via = "remix" },
+    { id = "Iron",       name = "Iron",       desc = "Death restarts the rally point", via = "mod"   },
+    { id = "Reload",     name = "Reload",     desc = "Randomises pre-placed weapons",  via = "remix" },
+    { id = "Adaptation", name = "Adaptation", desc = "Randomises enemy factions",      via = "remix" },
 }
 
--- Roll pool for the 1-2 extra skulls per floor. Only skulls that make a run
--- HARDER belong here: the enum also contains player-favouring ones (Bandana =
--- bottomless ammo, Envy = active camo, Scarab), pure-fun ones (Cowbell,
--- IWHBYD, Grunt Birthday Party), camera options (ThirdPerson) and the three
--- visibility modifiers, all of which are deliberately excluded — the last are
--- rolled separately as VISIBILITY_MODIFIERS.
+-- Roll pool for the extra skulls per floor: EVERY skull the game can activate,
+-- serious or goofy. The only enum members held back are
+--   * the three mandatory ones above (always on, never rolled),
+--   * the three visibility modifiers (rolled separately, one per floor),
+--   * CustomRed/CustomYellow/CustomBlue, which are the game's empty custom
+--     skull slots rather than gameplay skulls,
+--   * the None/Num/_MAX sentinels, which are not skulls at all.
+-- That leaves 47 rollable skulls.
 --
--- Descriptions are the classic Halo effects where the skull is the classic
--- one. Campaign Evolved adds skulls whose exact effect is not documented in
--- the reflection dump; those say so rather than guess.
+-- Descriptions are the classic Halo effects where the skull is a classic one.
+-- Campaign Evolved adds skulls whose effect the reflection dump does not
+-- describe; those say so rather than invent one — the game's own skull menu
+-- has the real text.
 Const.SKULL_POOL = {
+    -- Classic "harder" skulls
     { id = "Mythic",            name = "Mythic",            desc = "Enemies have double health",                verified = true },
     { id = "BlackEye",          name = "Black Eye",         desc = "Shields only recharge on melee hits",       verified = true },
     { id = "ToughLuck",         name = "Tough Luck",        desc = "Enemies always dodge and never flee",       verified = true },
@@ -102,6 +109,21 @@ Const.SKULL_POOL = {
     { id = "Swarm",             name = "Swarm",             desc = "Far more enemies per encounter",            verified = true },
     { id = "ThatsJustWrong",    name = "That's Just Wrong", desc = "Enemies hear further and react faster",     verified = true },
     { id = "TheyComeBack",      name = "They Come Back",    desc = "Fallen combat forms reanimate",             verified = true },
+    { id = "Armistice",         name = "Armistice",         desc = "Enemy factions never fight each other",     verified = true },
+    -- Goofy / player-favouring skulls: in the pool by request, so a floor can
+    -- roll a lucky break or a joke as easily as a beating.
+    { id = "Cowbell",           name = "Cowbell",           desc = "Explosion force sends everything flying",   verified = true },
+    { id = "GruntBirthdayParty", name = "Grunt Birthday Party", desc = "Headshot Grunts pop in confetti",       verified = true },
+    { id = "IWHBYD",            name = "IWHBYD",            desc = "Rare combat dialogue becomes common",       verified = true },
+    { id = "Bandana",           name = "Bandana",           desc = "Bottomless ammo and grenades",              verified = true },
+    { id = "Envy",              name = "Envy",              desc = "Active camouflage while not firing",        verified = true },
+    { id = "Pinata",            name = "Piñata",            desc = "Melee makes enemies drop grenades",         verified = true },
+    { id = "Scarab",            name = "Scarab",            desc = "Your weapons fire Scarab beams",            verified = true },
+    { id = "ThirdPerson",       name = "Third Person",      desc = "Play from a third-person camera",           verified = true },
+    -- Real enum members whose effect is not documented in the reflection dump.
+    { id = "Angry",             name = "Angry",             desc = "Effect not documented in the game data",    verified = true },
+    { id = "BondedPair",        name = "Bonded Pair",       desc = "Effect not documented in the game data",    verified = true },
+    { id = "Ghost",             name = "Ghost",             desc = "Effect not documented in the game data",    verified = true },
     -- Campaign Evolved additions: real enum members, effects not documented
     -- in the reflection dump. The game's own skull menu describes them.
     { id = "BootsOffTheGround", name = "Boots Off The Ground", desc = "Campaign Evolved skull",                 verified = true },
