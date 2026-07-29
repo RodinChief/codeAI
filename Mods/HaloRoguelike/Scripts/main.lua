@@ -58,7 +58,7 @@ local function handle_floor_complete()
     elseif status == State.STATUS.ACTIVE then
         Ui.set_notice(string.format("Floor complete — floor %d revealed",
             State.run.current_floor))
-        Ui.mode = "run"
+        Ui.mode = "floors"
         Ui.visible = true
         Ui.dirty()
     end
@@ -161,7 +161,7 @@ local function begin_new_run()
         Ui.set_notice("Could not start run: " .. tostring(rerr))
         return
     end
-    Ui.mode = "run"
+    Ui.mode = "floors"
     Ui.set_notice("Run started — seed " .. run.seed
         .. " (achievements likely disabled until you exit the mode)")
 end
@@ -198,34 +198,74 @@ end
 
 -- ------------------------------------------------------------- actions
 
-local function primary_action()
+-- Rows are dispatched on their TEXT, not on the current mode: the submenu now
+-- shows several distinct actions per screen (start / continue / a specific
+-- floor / mark complete), so a single "primary action" per mode no longer
+-- describes what the player picked.
+local function on_menu_row(text)
     if not enabled then
         Log.warn("main: mod disabled (build check failed?) — ignoring input")
         return
     end
-    if Ui.mode == "menu" then
-        if State.run and State.run.status == State.STATUS.ACTIVE then
-            Ui.mode = "run"      -- resume
-            Ui.visible = true
-            Ui.dirty()
-        else
-            Ui.mode = "confirm_new_run"
-            Ui.visible = true
-            Ui.dirty()
-        end
-    elseif Ui.mode == "confirm_new_run" then
+    local run = State.run
+
+    if text:find("YES — START THE RUN", 1, true) then
         begin_new_run()
-    elseif Ui.mode == "run" then
-        if not State.run then Ui.mode = "menu" Ui.dirty() return end
-        if State.run.floor_status == State.FLOOR.BRIEFING then
-            start_current_floor()
+
+    elseif text:find("START NEW RUN", 1, true) then
+        Ui.mode = "confirm_new_run"
+
+    elseif text:find("CONTINUE PREVIOUS RUN", 1, true) then
+        if run and run.status == State.STATUS.ACTIVE then
+            Ui.mode = "floors"
+        elseif run then
+            Ui.mode = "summary"
         else
-            -- Manual fallback while the mission-complete hook is unresolved.
-            Log.info("main: manual floor-complete trigger")
-            handle_floor_complete()
+            Ui.set_notice("No previous run saved — start a new one")
         end
-    elseif Ui.mode == "summary" then
+
+    elseif text:find("CLOSE RUN", 1, true) then
         close_summary()
+
+    elseif text:find("MARK FLOOR COMPLETE", 1, true) then
+        Log.info("main: manual floor-complete trigger")
+        handle_floor_complete()
+
+    else
+        local n = tonumber(text:match("FLOOR (%d+)"))
+        if n and run then
+            if n ~= run.current_floor then
+                Ui.set_notice(string.format(
+                    "Floor %d is not the floor you are on — play floor %d next",
+                    n, run.current_floor))
+            elseif run.floor_status ~= State.FLOOR.BRIEFING then
+                Ui.set_notice("That floor is already running")
+            else
+                start_current_floor()
+            end
+        end
+    end
+    Ui.visible = true
+    Ui.dirty()
+end
+
+-- F5 keeps working as a shortcut for "the obvious thing on this screen".
+local function primary_action()
+    if not enabled then return end
+    if Ui.mode == "confirm_new_run" then
+        on_menu_row("▶ YES — START THE RUN")
+    elseif Ui.mode == "summary" then
+        on_menu_row("▶ CLOSE RUN")
+    elseif Ui.mode == "floors" and State.run then
+        if State.run.floor_status == State.FLOOR.BRIEFING then
+            on_menu_row("FLOOR " .. State.run.current_floor)
+        else
+            on_menu_row("▶ MARK FLOOR COMPLETE")
+        end
+    elseif State.run and State.run.status == State.STATUS.ACTIVE then
+        on_menu_row("▶ CONTINUE PREVIOUS RUN")
+    else
+        on_menu_row("▶ START NEW RUN")
     end
 end
 
@@ -311,18 +351,27 @@ local function finish_init(build_ok, build)
     -- start run confirm -> begin run -> launch floor / mark complete -> close.
     Menuinject.set_row_callback(function(text)
         if text:sub(1, #"◀") == "◀" then
-            if Ui.mode == "confirm_new_run" then Ui.mode = "menu" end
-            Ui.visible = false
-            Ui.dirty()
+            -- BACK steps one screen up rather than closing outright, so the
+            -- floor list returns to the start/continue screen first.
+            if Ui.mode == "floors" or Ui.mode == "summary"
+                or Ui.mode == "confirm_new_run" then
+                Ui.mode = "menu"
+                Ui.dirty()
+                Menuinject.reopen()
+            else
+                Ui.visible = false
+                Ui.dirty()
+            end
             return
         end
-        -- The rows shown come from the run state (ui.compact_lines), so make
-        -- the mode agree with it before dispatching — a stale mode would send
-        -- primary_action down the wrong branch.
-        if State.run and Ui.mode ~= "confirm_new_run" then
-            Ui.mode = State.run.status == State.STATUS.ACTIVE and "run" or "summary"
+        on_menu_row(text)
+    end)
+    -- Highlighting a floor fills the detail panel beside the list.
+    Menuinject.set_focus_callback(function(text)
+        if Ui.focus_text ~= text then
+            Ui.focus_text = text
+            Ui.dirty()
         end
-        primary_action()
     end)
 
     -- Map-load hook: logs real mission level names (discovery), force-closes

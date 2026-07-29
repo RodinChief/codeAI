@@ -43,6 +43,13 @@ local function skull_by_id(id)
     for _, s in ipairs(Const.SKULL_POOL) do
         if s.id == id then return s end
     end
+    -- Visibility modifiers are skulls too, and they show up in a floor's
+    -- active list; without this they rendered as raw ids ("LightsOut").
+    for _, v in ipairs(Const.VISIBILITY_MODIFIERS) do
+        if v.skull == id then
+            return { id = id, name = v.name, desc = "Visibility modifier" }
+        end
+    end
     return { id = id, name = id, desc = "" }
 end
 
@@ -204,25 +211,103 @@ function Ui.panel_lines(capability_status)
     return lines
 end
 
--- Compact lines for the in-menu roguelike SUBMENU (menuinject). Row prefixes
--- carry meaning: "▶ " rows are selectable actions, "◀ " rows go back, plain
--- rows are informational. menuinject activates ▶/◀ rows on click OR on
--- holding gamepad focus on them (~1s), so no keyboard is ever required.
--- Short lines only — the menu row widget clips long text.
+-- ------------------------------------------------- in-menu submenu rendering
+--
+-- Row prefixes are the contract menuinject dispatches on:
+--   "▶ " selectable action · "◀ " back · anything else informational.
+-- Rows are activated by clicking them or by holding gamepad focus on them,
+-- so no keyboard is ever required.
+--
+-- Screens (Ui.mode):
+--   "menu"            root: START NEW RUN / CONTINUE PREVIOUS RUN
+--   "confirm_new_run" warning + YES/NO
+--   "floors"          mission-select-style floor list + detail panel
+--   "summary"         end-of-run verdict
+--
+-- Ui.focus_text is the text of the row the player is currently highlighting,
+-- fed back by menuinject. The floor screen uses it to fill the detail panel,
+-- mirroring how the game's own Mission Select shows a description beside the
+-- highlighted mission.
+Ui.focus_text = nil
+
+-- Detail panel is a FIXED number of rows: the row list must not change length
+-- while the player moves through it, or the focused row shifts under them.
+local DETAIL_ROWS = 6
+
+local function pad_to(lines, n)
+    while #lines < n do lines[#lines + 1] = " " end
+    return lines
+end
+
+-- Which floor the player is highlighting, parsed from the focused row text.
+function Ui.focused_floor()
+    if not Ui.focus_text then return nil end
+    local n = Ui.focus_text:match("FLOOR (%d+)")
+    return n and tonumber(n) or nil
+end
+
+-- The detail panel for one floor: mission, rally point, difficulty and every
+-- skull active on that floor. Fog of war applies — a locked floor shows
+-- nothing but its lock.
+function Ui.floor_detail_lines(index)
+    local run = State.run
+    if not run or not run.floors[index] then return {} end
+    local fl = run.floors[index]
+    local locked = index > run.current_floor and run.status == State.STATUS.ACTIVE
+    if locked then
+        return pad_to({
+            string.format("FLOOR %d — LOCKED", index),
+            "Clear the floors before it to reveal this one.",
+        }, DETAIL_ROWS)
+    end
+
+    local out = {
+        string.format("FLOOR %d — %s", index, mission_by_id(fl.mission_id).name),
+        string.format("Rally Point %s  ·  %s%s  ·  Visibility: %s",
+            fl.rally, fl.difficulty, fl.nerf and " +" or "",
+            vis_by_id(fl.visibility).name),
+    }
+    -- Every skull that will be on for this floor, not just the new ones.
+    local names = {}
+    for _, id in ipairs(State.skulls_for_floor(index)) do
+        names[#names + 1] = skull_by_id(id).name
+    end
+    out[#out + 1] = string.format("Skulls active (%d):", #names)
+    -- Fill each row up to the menu row's usable width rather than splitting
+    -- the names evenly, which left rows half empty.
+    local room = DETAIL_ROWS - #out
+    local line = ""
+    for i, n in ipairs(names) do
+        local sep = (line == "") and "" or ", "
+        if #line + #sep + #n > 58 and #out < DETAIL_ROWS then
+            out[#out + 1] = "  " .. line
+            line = n
+        else
+            line = line .. sep .. n
+        end
+        -- Out of rows: fold whatever is left into a count.
+        if #out == DETAIL_ROWS - 1 and i < #names then
+            line = line .. string.format(" (+%d more)", #names - i)
+            break
+        end
+    end
+    if line ~= "" and #out < DETAIL_ROWS then out[#out + 1] = "  " .. line end
+    return pad_to(out, DETAIL_ROWS)
+end
+
 function Ui.compact_lines()
     local run = State.run
+
     if Ui.mode == "confirm_new_run" then
         return {
-            "START RUN? Save is backed up first, then overwritten",
+            "START RUN? Your save is backed up first, then overwritten",
             "Achievements likely OFF until you exit the mode",
             "▶ YES — START THE RUN",
             "◀ NO — BACK",
         }
     end
-    if not run then
-        return { "▶ START NEW RUN", "◀ BACK" }
-    end
-    if run.status ~= State.STATUS.ACTIVE then
+
+    if Ui.mode == "summary" and run then
         local verdict = run.status == State.STATUS.WON and "RUN WON"
             or run.status == State.STATUS.LOST and "RUN LOST" or "RUN ENDED"
         return {
@@ -231,40 +316,58 @@ function Ui.compact_lines()
             "◀ BACK",
         }
     end
-    -- Full floor list, roguelike-style: revealed floors show their loadout,
-    -- future floors show as LOCKED. The CURRENT floor is the selectable row:
-    -- selecting it launches the mission (or marks it complete mid-mission).
-    local lines = {
-        string.format("%s  ·  %s", run.seed, Ui.corner_counter() or ""),
-    }
-    local in_mission = run.floor_status ~= State.FLOOR.BRIEFING
-    for i = 1, Const.FLOORS_PER_RUN do
-        local fl = run.floors[i]
-        if i > run.current_floor then
-            lines[#lines + 1] = string.format("FLOOR %d — LOCKED", i)
-        elseif i < run.current_floor then
-            lines[#lines + 1] = string.format("FLOOR %d ✓ %s", i,
-                mission_by_id(fl.mission_id).name)
-        elseif in_mission then
-            lines[#lines + 1] = string.format("FLOOR %d ⏳ %s @ Rally %s · %s%s", i,
-                mission_by_id(fl.mission_id).name, fl.rally,
-                fl.difficulty, fl.nerf and " +" or "")
-        else
-            lines[#lines + 1] = string.format("▶ FLOOR %d: %s @ Rally %s · %s%s", i,
-                mission_by_id(fl.mission_id).name, fl.rally,
-                fl.difficulty, fl.nerf and " +" or "")
+
+    -- Floor select: the mission-select-style screen.
+    if Ui.mode == "floors" and run then
+        local in_mission = run.floor_status ~= State.FLOOR.BRIEFING
+        local lines = {
+            string.format("%s  ·  %s", run.seed, Ui.corner_counter() or ""),
+        }
+        for i = 1, Const.FLOORS_PER_RUN do
+            local fl = run.floors[i]
+            if i > run.current_floor then
+                lines[#lines + 1] = string.format("FLOOR %d — LOCKED", i)
+            elseif i < run.current_floor then
+                lines[#lines + 1] = string.format("FLOOR %d ✓ %s", i,
+                    mission_by_id(fl.mission_id).name)
+            elseif in_mission then
+                lines[#lines + 1] = string.format("FLOOR %d ⏳ %s (in progress)", i,
+                    mission_by_id(fl.mission_id).name)
+            else
+                lines[#lines + 1] = string.format("▶ FLOOR %d — %s", i,
+                    mission_by_id(fl.mission_id).name)
+            end
         end
+        lines[#lines + 1] = "────────────────────────────"
+        -- Detail for whichever floor is highlighted, defaulting to the current
+        -- one so the panel is never blank.
+        for _, l in ipairs(Ui.floor_detail_lines(Ui.focused_floor()
+            or run.current_floor)) do
+            lines[#lines + 1] = l
+        end
+        if in_mission then
+            lines[#lines + 1] = "▶ MARK FLOOR COMPLETE (after beating the mission)"
+        end
+        lines[#lines + 1] = "◀ BACK"
+        return lines
     end
-    local cur = run.floors[run.current_floor]
-    local names = {}
-    for _, id in ipairs(cur.new_skulls) do names[#names + 1] = skull_by_id(id).name end
-    lines[#lines + 1] = string.format("New skulls: %s · Vis: %s",
-        table.concat(names, ", "), vis_by_id(cur.visibility).name)
-    if in_mission then
-        lines[#lines + 1] = "▶ MARK FLOOR COMPLETE (after beating the mission)"
+
+    -- Root: always both entries, exactly as the campaign menu offers new game
+    -- and resume side by side.
+    local resume = "▶ CONTINUE PREVIOUS RUN"
+    if run and run.status == State.STATUS.ACTIVE then
+        resume = string.format("▶ CONTINUE PREVIOUS RUN — %s, floor %d/%d",
+            run.seed, run.current_floor, Const.FLOORS_PER_RUN)
+    elseif run then
+        resume = "▶ CONTINUE PREVIOUS RUN — finished run, view summary"
+    else
+        resume = "▶ CONTINUE PREVIOUS RUN — (no run saved yet)"
     end
-    lines[#lines + 1] = "◀ BACK"
-    return lines
+    return {
+        "▶ START NEW RUN",
+        resume,
+        "◀ BACK",
+    }
 end
 
 -- ---------------------------------------------------------------- backends

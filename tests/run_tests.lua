@@ -316,38 +316,70 @@ local function prefixed(lines, prefix)
     return n
 end
 
-Ui.mode = "run" -- finished run (status=won from above): close-run rows
+Ui.mode = "summary" -- finished run (status=won from above): close-run rows
 local cl = Ui.compact_lines()
-check(prefixed(cl, "▶") == 1 and cl[2]:match("CLOSE RUN"),
-    "ui: compact ended-run has one ▶ CLOSE RUN row")
-check(prefixed(cl, "◀") == 1, "ui: compact ended-run has a ◀ BACK row")
+check(prefixed(cl, "\u{25B6}") == 1 and cl[2]:match("CLOSE RUN"),
+    "ui: summary screen has one CLOSE RUN action")
+check(prefixed(cl, "\u{25C0}") == 1, "ui: summary screen has a BACK row")
 
+-- Root screen: BOTH entries are always offered, whether or not a run exists.
 State.clear()
-Ui.mode = "menu" -- no run at all
+Ui.mode = "menu"
 cl = Ui.compact_lines()
-check(prefixed(cl, "▶") == 1 and cl[1] == "▶ START NEW RUN",
-    "ui: compact no-run offers START NEW RUN")
+check(prefixed(cl, "\u{25B6}") == 2, "ui: root screen offers two actions")
+check(cl[1] == "\u{25B6} START NEW RUN", "ui: root screen starts with START NEW RUN")
+check(cl[2]:match("CONTINUE PREVIOUS RUN") ~= nil,
+    "ui: root screen offers CONTINUE PREVIOUS RUN")
+check(cl[2]:match("no run saved") ~= nil,
+    "ui: continue entry says so when there is no run")
+
 Ui.mode = "confirm_new_run"
 cl = Ui.compact_lines()
-check(prefixed(cl, "▶") == 1 and prefixed(cl, "◀") == 1,
-    "ui: compact confirm has YES and BACK rows")
+check(prefixed(cl, "\u{25B6}") == 1 and prefixed(cl, "\u{25C0}") == 1,
+    "ui: confirm screen has YES and BACK rows")
 
--- Active run: the current floor is the single ▶ row while briefing, and
--- flips to MARK FLOOR COMPLETE while the mission runs. Locked floors stay fogged.
+-- Floor select: five floor rows, a fixed-height detail panel, and fog of war.
 State.new_run("HALO-7K2M-QX9", "20260728-000003")
-Ui.mode = "run"
+Ui.mode = "menu"
 cl = Ui.compact_lines()
-check(prefixed(cl, "▶") == 1 and cl[2]:match("^▶ FLOOR 1: ") ~= nil,
-    "ui: compact briefing has one ▶ floor row")
-check(table.concat(cl, "\n"):match("FLOOR 3 — LOCKED") ~= nil,
-    "ui: compact locked floors fogged")
+check(cl[2]:match("floor 1/5") ~= nil,
+    "ui: continue entry shows the run's progress once a run exists")
+
+Ui.mode = "floors"
+Ui.focus_text = nil
+cl = Ui.compact_lines()
+local blob = table.concat(cl, "\n")
+check(prefixed(cl, "\u{25B6}") == 1 and cl[2]:match("^\u{25B6} FLOOR 1 ") ~= nil,
+    "ui: only the current floor is launchable")
+check(blob:match("FLOOR 3 \u{2014} LOCKED") ~= nil, "ui: locked floors stay fogged")
+check(blob:match("Skulls active %\u{28}%d+%\u{29}:") ~= nil,
+    "ui: detail panel lists the active skulls")
+check(blob:match("Rally Point") ~= nil, "ui: detail panel names the rally point")
+
+-- The row count must not change as the highlight moves, or the focused row
+-- would shift under the player mid-selection.
+local base = #cl
+for floor = 1, 5 do
+    Ui.focus_text = "FLOOR " .. floor
+    check(#Ui.compact_lines() == base,
+        "ui: row count is stable while highlighting floor " .. floor)
+end
+
+-- Highlighting a revealed floor describes THAT floor; a locked one stays hidden.
+Ui.focus_text = "FLOOR 1"
+check(table.concat(Ui.compact_lines(), "\n"):match("FLOOR 1 \u{2014} ") ~= nil,
+    "ui: highlighting floor 1 describes floor 1")
+Ui.focus_text = "FLOOR 4"
+check(table.concat(Ui.compact_lines(), "\n"):match("Clear the floors before it") ~= nil,
+    "ui: highlighting a locked floor reveals nothing")
+
+Ui.focus_text = nil
 State.on_floor_launched()
 cl = Ui.compact_lines()
-check(prefixed(cl, "▶") == 1
-    and table.concat(cl, "\n"):match("MARK FLOOR COMPLETE") ~= nil,
-    "ui: compact in-mission has one ▶ MARK FLOOR COMPLETE row")
-check(table.concat(cl, "\n"):match("⏳") ~= nil,
-    "ui: compact in-mission floor marked in progress")
+check(table.concat(cl, "\n"):match("MARK FLOOR COMPLETE") ~= nil,
+    "ui: in-mission floor offers MARK FLOOR COMPLETE")
+check(table.concat(cl, "\n"):match("in progress") ~= nil,
+    "ui: in-mission floor is marked in progress")
 
 -- ------------------------------------------------------------------ done
 os.remove(statefile)

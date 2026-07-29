@@ -1084,10 +1084,46 @@ end
 -- F7: log a discovery report. Complements UE4SS's own object dumper (use the
 -- UE4SS GUI "Dump Objects" for the full UObject dump); this report focuses on
 -- the specific classes this mod needs.
+-- Can the floor cards show the game's own mission artwork? The scenario table
+-- row carries MissionPreviewImage (TSoftObjectPtr<UTexture2D>) and the main
+-- menu already owns a preview panel (WBP_ResumeCampaignInfoPanel_C with
+-- SetCampaignUIInfo). This logs whether both are reachable at runtime, which
+-- decides whether an image can be put beside the floor list at all.
+function Gameapi.dump_image_sources()
+    Log.discover("---- image sources ----")
+    for _, cls in ipairs({ "WBP_ResumeCampaignInfoPanel_C", "HaloUIImage",
+        "Image", "BlamScenarioDataTable" }) do
+        local all = try("FindAllOf(" .. cls .. ")", FindAllOf, cls)
+        Log.discover("IMG %s: %d instance(s)", cls, all and #all or 0)
+        if all and all[1] then
+            local cl = try("GetClass", function() return all[1]:GetClass() end)
+            if cl then
+                local fns = {}
+                pcall(function()
+                    cl:ForEachFunction(function(fn) fns[#fns + 1] = fstr(fn:GetFName()) end)
+                end)
+                if #fns > 0 then
+                    Log.discover("IMG %s functions: %s", cls,
+                        table.concat(fns, ", "):sub(1, 400))
+                end
+            end
+        end
+    end
+    -- Mission artwork assets, if any are loaded.
+    local hits = scan_multi({ "MissionPreview", "ScenarioDataTable", "T_Mission" }, 12)
+    for key, list in pairs(hits) do
+        for _, e in ipairs(list) do
+            Log.discover("IMG %s -> %s", key, e.name)
+        end
+    end
+    Log.discover("---- image sources end ----")
+end
+
 function Gameapi.discovery_dump()
     Log.discover("==== discovery dump start ====")
     Gameapi.get_build_version()
     Gameapi.dump_enums()
+    Gameapi.dump_image_sources()
 
     local probes = {
         "MeteoriteGameUserSettings",

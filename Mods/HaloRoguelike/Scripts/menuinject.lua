@@ -75,6 +75,8 @@ local DWELL_ROW_TICKS  = 4   -- ~1s on a ▶/◀ row
 local injected = nil       -- our injected ROGUELIKE entry widget, once created
 local on_activate = nil    -- callback: roguelike submenu was opened
 local on_row_click = nil   -- callback(text): a "▶"/"◀" row was activated
+local on_row_focus = nil   -- callback(text): the highlighted row changed
+local focused_text = nil   -- text of the row currently highlighted
 local click_hooked = false
 local last_log = nil       -- de-spam: repeat log lines are suppressed
 local last_click_log = nil
@@ -380,6 +382,16 @@ local function start_watcher()
             end
             if target ~= dwell_target then
                 dwell_target, dwell_ticks, dwell_fired = target, 0, false
+                -- Report the highlighted row so the UI can fill its detail
+                -- panel, the way the game's own Mission Select describes the
+                -- mission you are pointing at.
+                local text = (type(target) == "number") and row_texts[target] or nil
+                if text ~= focused_text then
+                    focused_text = text
+                    if on_row_focus then
+                        ExecuteInGameThread(function() on_row_focus(text) end)
+                    end
+                end
             elseif target ~= nil and not dwell_fired then
                 dwell_ticks = dwell_ticks + 1
                 local need = (target == "entry") and DWELL_OPEN_TICKS
@@ -416,8 +428,24 @@ function Menuinject.set_row_callback(cb)
     on_row_click = cb
 end
 
+-- Register the highlight handler: cb(row_text) whenever focus moves.
+function Menuinject.set_focus_callback(cb)
+    on_row_focus = cb
+end
+
 function Menuinject.is_open()
     return submenu_open
+end
+
+-- Stay in the submenu but re-render its rows, used when BACK steps from the
+-- floor list up to the start/continue screen rather than closing outright.
+function Menuinject.reopen()
+    if not submenu_open then
+        open_submenu()
+    else
+        last_status = nil
+        apply_pending_rows()
+    end
 end
 
 function Menuinject.close()
@@ -490,14 +518,28 @@ local function attempt()
         return false
     end
 
-    -- Position directly after the template row (Campaign Remix). ShiftChild
-    -- exists on some panels at runtime; harmless if absent (entry lands at
-    -- the bottom of the list instead).
-    local idx = try(function() return parent:GetChildIndex(template) end)
-    if type(idx) == "number" and idx >= 0 then
-        if not try(function() parent:ShiftChild(idx + 1, clone) return true end) then
-            try(function() parent:ShiftChild(clone, idx + 1) return true end)
-        end
+    -- Position directly below CAMPAIGN REMIX. AddChild appends to the end of
+    -- the list, so the entry has to be moved up; the panel API that does this
+    -- varies, hence the ordered attempts with the result logged.
+    local want = try(function() return parent:GetChildIndex(template) end)
+    if type(want) == "number" and want >= 0 then
+        want = want + 1
+        local moved = try(function()
+            parent:ShiftChild(want, clone) return true
+        end) or try(function()
+            parent:ShiftChild(clone, want) return true
+        end) or try(function()
+            parent:RemoveChild(clone)
+            parent:InsertChildAt(want, clone)
+            return true
+        end)
+        local now = try(function() return parent:GetChildIndex(clone) end)
+        Log.discover("menuinject: position -> wanted index %d, got %s "
+            .. "(move=%s, panel=%s, children=%s)", want, tostring(now),
+            moved and "ok" or "unavailable",
+            full_name(try(function() return parent:GetClass() end) or "?")
+                :gsub("^%S+%s", ""),
+            tostring(try(function() return parent:GetChildrenCount() end)))
     end
 
     hook_clicks()

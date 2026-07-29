@@ -131,6 +131,13 @@ function State.active_skulls()
     return Rungen.active_skulls(State.run, State.run.current_floor)
 end
 
+-- Skulls that will be active on an arbitrary floor. Used by the floor-select
+-- detail panel, which describes any revealed floor, not only the current one.
+function State.skulls_for_floor(index)
+    if not State.run or not State.run.floors[index] then return {} end
+    return Rungen.active_skulls(State.run, index)
+end
+
 -- Called when the mission for the current floor actually launches.
 function State.on_floor_launched()
     if not State.run then return end
