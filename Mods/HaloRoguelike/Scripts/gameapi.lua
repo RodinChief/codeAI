@@ -875,10 +875,13 @@ end
 function Gameapi.skull_enum_values(skull_ids)
     local vals = enum_values.skulls
     if not vals then return nil end
-    -- Match case-insensitively, ignoring underscores: "grunt_bday" -> "GruntBday".
+    -- Members come back fully qualified ("EBlamGameSkulls::Iron"), so the
+    -- enum prefix has to go before comparing — without this every lookup
+    -- missed and 0 of 5 skulls were sent (on-device 2026-07-29).
     local norm = {}
     for name, v in pairs(vals) do
-        norm[name:lower():gsub("[^%a%d]", "")] = v
+        local short = name:match("::([%w_]+)$") or name
+        norm[short:lower():gsub("[^%a%d]", "")] = v
     end
     local out, missing = {}, {}
     for _, id in ipairs(skull_ids) do

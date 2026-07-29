@@ -79,6 +79,26 @@ local Const = require("const")
 local Config = require("config")
 local Rungen = require("rungen")
 
+-- Valid-id sets are derived from const.lua rather than hardcoded, so renaming
+-- skulls (e.g. to the real EBlamGameSkulls member names) cannot silently
+-- invalidate these checks.
+local mandatory_ids, pool_ids, vis_ids = {}, {}, {}
+for _, s in ipairs(Const.MANDATORY_SKULLS) do mandatory_ids[s.id] = true end
+for _, s in ipairs(Const.SKULL_POOL) do pool_ids[s.id] = true end
+for _, v in ipairs(Const.VISIBILITY_MODIFIERS) do vis_ids[v.id] = true end
+
+-- A skull may not be both mandatory and rollable, and visibility modifiers
+-- must stay out of the roll pool (they are rolled separately, one per floor).
+for id in pairs(mandatory_ids) do
+    check(not pool_ids[id], "const: mandatory skull not in roll pool (" .. id .. ")")
+end
+for _, v in ipairs(Const.VISIBILITY_MODIFIERS) do
+    if v.skull then
+        check(not pool_ids[v.skull],
+            "const: visibility skull not in roll pool (" .. v.skull .. ")")
+    end
+end
+
 local function validate_run(run, seed)
     check(#run.floors == 5, seed .. ": 5 floors")
     local mission_seen, alpha_count = {}, 0
@@ -101,12 +121,10 @@ local function validate_run(run, seed)
         for _, id in ipairs(fl.new_skulls) do
             check(not skull_seen[id], seed .. ": no duplicate skull " .. id)
             skull_seen[id] = true
-            check(id ~= "iron" and id ~= "adaptation" and id ~= "reload"
-                and id ~= "armistice", seed .. ": mandatory skulls never rolled")
+            check(not mandatory_ids[id], seed .. ": mandatory skulls never rolled")
+            check(pool_ids[id], seed .. ": rolled skull is in the pool (" .. id .. ")")
         end
-        local vis_ok = fl.visibility == "default" or fl.visibility == "spore"
-            or fl.visibility == "nightvision"
-        check(vis_ok, seed .. ": visibility id valid")
+        check(vis_ids[fl.visibility], seed .. ": visibility id valid")
     end
     check(alpha_count == 1, seed .. ": exactly one Alpha floor (got " .. alpha_count .. ")")
 end
@@ -125,7 +143,29 @@ check(Json.encode(g1) == Json.encode(g2), "rungen: deterministic from seed")
 local active3 = Rungen.active_skulls(g1, 3)
 local active5 = Rungen.active_skulls(g1, 5)
 check(#active3 >= 4 + 3 and #active5 > #active3, "rungen: skulls accumulate")
-check(active3[1] == "iron", "rungen: iron always first mandatory")
+check(active3[1] == Const.MANDATORY_SKULLS[1].id,
+    "rungen: Iron always first mandatory")
+
+-- The floor's visibility modifier rides along in active_skulls, and only that
+-- floor's (visibility is per-floor, never cumulative).
+for floor = 1, 5 do
+    local act = Rungen.active_skulls(g1, floor)
+    local seen_vis = {}
+    for _, id in ipairs(act) do
+        for _, v in ipairs(Const.VISIBILITY_MODIFIERS) do
+            if v.skull == id then seen_vis[#seen_vis + 1] = id end
+        end
+    end
+    local want = nil
+    for _, v in ipairs(Const.VISIBILITY_MODIFIERS) do
+        if v.id == g1.floors[floor].visibility then want = v.skull end
+    end
+    check(#seen_vis == (want and 1 or 0),
+        "rungen: exactly this floor's visibility skull on floor " .. floor)
+    if want then
+        check(seen_vis[1] == want, "rungen: correct visibility skull floor " .. floor)
+    end
+end
 
 -- ------------------------------------------------------------------ state
 -- Stub paths so state persists into a temp dir on this (Linux) host.

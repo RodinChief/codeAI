@@ -96,7 +96,9 @@ function Rungen.generate(seed_string)
 end
 
 -- Skulls active on a given floor: the 4 mandatory ones plus every skull
--- rolled on floors 1..floor_index.
+-- rolled on floors 1..floor_index, plus THIS floor's visibility modifier.
+-- Visibility is per-floor and not cumulative (brief §4), so only the current
+-- floor's modifier is included.
 function Rungen.active_skulls(run, floor_index)
     local active = {}
     for _, s in ipairs(Const.MANDATORY_SKULLS) do
@@ -105,6 +107,12 @@ function Rungen.active_skulls(run, floor_index)
     for i = 1, floor_index do
         for _, id in ipairs(run.floors[i].new_skulls) do
             active[#active + 1] = id
+        end
+    end
+    local vis_id = run.floors[floor_index] and run.floors[floor_index].visibility
+    for _, v in ipairs(Const.VISIBILITY_MODIFIERS) do
+        if v.id == vis_id and v.skull then
+            active[#active + 1] = v.skull
         end
     end
     return active

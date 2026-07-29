@@ -66,6 +66,14 @@ local function handle_death()
         Log.info("main: swallowing initial spawn event")
         return
     end
+    -- ClientRestart also fires on world transitions, so quitting a mission
+    -- back to the menus counted as a death on-device (2026-07-29). A death
+    -- only counts while a mission world is actually loaded.
+    if Gameapi.in_mission_world() == false then
+        Log.info("main: ignoring ClientRestart outside a mission world "
+            .. "(quit to menu, not a death)")
+        return
+    end
     local result = State.on_death()
     Ui.dirty()
     if result == "lost" then

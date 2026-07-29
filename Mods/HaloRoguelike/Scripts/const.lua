@@ -54,44 +54,80 @@ Const.DIFFICULTY_LADDER = {
     [5] = { difficulty = "Legendary", nerf = true  },
 }
 
+-- Skull ids below are the REAL EBlamGameSkulls member names, read from the
+-- live enum on-device 2026-07-29 (/Script/BlamGlue.EBlamGameSkulls, 56
+-- members). gameapi maps id -> enum value case-insensitively, so these must
+-- keep matching the enum spelling.
+--
 -- Mandatory skulls, active for the entire run.
 -- Adaptation / Reload / Armistice come free with Campaign Remix (§5 of the
 -- brief); the mod itself only has to force Iron.
 Const.MANDATORY_SKULLS = {
-    { id = "iron",       name = "Iron",       desc = "Death restarts the rally point",        via = "mod"   },
-    { id = "adaptation", name = "Adaptation", desc = "Randomises enemy factions",             via = "remix" },
-    { id = "reload",     name = "Reload",     desc = "Randomises pre-placed weapons",         via = "remix" },
-    { id = "armistice",  name = "Armistice",  desc = "Enemy factions never fight each other", via = "remix" },
+    { id = "Iron",       name = "Iron",       desc = "Death restarts the rally point",        via = "mod"   },
+    { id = "Adaptation", name = "Adaptation", desc = "Randomises enemy factions",             via = "remix" },
+    { id = "Reload",     name = "Reload",     desc = "Randomises pre-placed weapons",         via = "remix" },
+    { id = "Armistice",  name = "Armistice",  desc = "Enemy factions never fight each other", via = "remix" },
 }
 
--- Roll pool for the 1-2 extra skulls per floor. 42 skulls exist in total;
--- this pool is seeded with the classic CE skull set as candidates and MUST be
--- reconciled against the real skull enum from the UObject dump (§7.2).
--- Skulls in the mandatory set are never rolled.
+-- Roll pool for the 1-2 extra skulls per floor. Only skulls that make a run
+-- HARDER belong here: the enum also contains player-favouring ones (Bandana =
+-- bottomless ammo, Envy = active camo, Scarab), pure-fun ones (Cowbell,
+-- IWHBYD, Grunt Birthday Party), camera options (ThirdPerson) and the three
+-- visibility modifiers, all of which are deliberately excluded — the last are
+-- rolled separately as VISIBILITY_MODIFIERS.
+--
+-- Descriptions are the classic Halo effects where the skull is the classic
+-- one. Campaign Evolved adds skulls whose exact effect is not documented in
+-- the reflection dump; those say so rather than guess.
 Const.SKULL_POOL = {
-    { id = "mythic",       name = "Mythic",              desc = "Enemies have double health",                 verified = false },
-    { id = "boom",         name = "Boom",                desc = "Explosion radius doubled",                   verified = false },
-    { id = "foreign",      name = "Foreign",             desc = "Cannot use Covenant weapons",                verified = false },
-    { id = "famine",       name = "Famine",              desc = "Dropped weapons have half ammo",             verified = false },
-    { id = "fog",          name = "Fog",                 desc = "Motion tracker disabled",                    verified = false },
-    { id = "malfunction",  name = "Malfunction",         desc = "A random HUD element drops out on respawn",  verified = false },
-    { id = "recession",    name = "Recession",           desc = "Every shot costs double ammo",               verified = false },
-    { id = "black_eye",    name = "Black Eye",           desc = "Shields only recharge on melee hits",        verified = false },
-    { id = "eye_patch",    name = "Eye Patch",           desc = "Auto-aim disabled",                          verified = false },
-    { id = "pinata",       name = "Piñata",              desc = "Melee makes enemies drop grenades",          verified = false },
-    { id = "grunt_funeral", name = "Grunt Funeral",      desc = "Grunts explode on death",                    verified = false },
-    { id = "grunt_bday",   name = "Grunt Birthday Party", desc = "Headshot Grunts celebrate",                 verified = false },
-    { id = "tough_luck",   name = "Tough Luck",          desc = "Enemies always dodge and never flee",        verified = false },
-    { id = "catch",        name = "Catch",               desc = "Enemies throw far more grenades",            verified = false },
+    { id = "Mythic",            name = "Mythic",            desc = "Enemies have double health",                verified = true },
+    { id = "BlackEye",          name = "Black Eye",         desc = "Shields only recharge on melee hits",       verified = true },
+    { id = "ToughLuck",         name = "Tough Luck",        desc = "Enemies always dodge and never flee",       verified = true },
+    { id = "Catch",             name = "Catch",             desc = "Enemies throw far more grenades",           verified = true },
+    { id = "Fog",               name = "Fog",               desc = "Motion tracker disabled",                   verified = true },
+    { id = "Famine",            name = "Famine",            desc = "Dropped weapons have half ammo",            verified = true },
+    { id = "Thunderstorm",      name = "Thunderstorm",      desc = "Enemies are promoted to higher ranks",      verified = true },
+    { id = "Tilt",              name = "Tilt",              desc = "Enemy resistances are far more punishing",  verified = true },
+    { id = "Assassin",          name = "Assassin",          desc = "Enemies are permanently cloaked",           verified = true },
+    { id = "Blind",             name = "Blind",             desc = "HUD and weapon are hidden",                 verified = true },
+    { id = "Boom",              name = "Boom",              desc = "Explosion radius doubled",                  verified = true },
+    { id = "EyePatch",          name = "Eye Patch",         desc = "Auto-aim disabled",                         verified = true },
+    { id = "Foreign",           name = "Foreign",           desc = "Cannot use Covenant weapons",               verified = true },
+    { id = "Malfunction",       name = "Malfunction",       desc = "A random HUD element drops out on respawn", verified = true },
+    { id = "Recession",         name = "Recession",         desc = "Every shot costs double ammo",              verified = true },
+    { id = "GruntFuneral",      name = "Grunt Funeral",     desc = "Grunts explode on death",                   verified = true },
+    { id = "Jacked",            name = "Jacked",            desc = "Enemies hijack vehicles aggressively",      verified = true },
+    { id = "Masterblaster",     name = "Masterblaster",     desc = "Enemies favour heavy weapons",              verified = true },
+    { id = "SoAngry",           name = "So Angry",          desc = "Enemies are enraged from the start",        verified = true },
+    { id = "Swarm",             name = "Swarm",             desc = "Far more enemies per encounter",            verified = true },
+    { id = "ThatsJustWrong",    name = "That's Just Wrong", desc = "Enemies hear further and react faster",     verified = true },
+    { id = "TheyComeBack",      name = "They Come Back",    desc = "Fallen combat forms reanimate",             verified = true },
+    -- Campaign Evolved additions: real enum members, effects not documented
+    -- in the reflection dump. The game's own skull menu describes them.
+    { id = "BootsOffTheGround", name = "Boots Off The Ground", desc = "Campaign Evolved skull",                 verified = true },
+    { id = "Riskrun",           name = "Riskrun",           desc = "Campaign Evolved skull",                    verified = true },
+    { id = "Pop",               name = "Pop",               desc = "Campaign Evolved skull",                    verified = true },
+    { id = "EnduranceSpec",     name = "Endurance Spec",    desc = "Campaign Evolved skull",                    verified = true },
+    { id = "GiveAndTake",       name = "Give And Take",     desc = "Campaign Evolved skull",                    verified = true },
+    { id = "StowAndGrow",       name = "Stow And Grow",     desc = "Campaign Evolved skull",                    verified = true },
+    { id = "HipFire",           name = "Hip Fire",          desc = "Campaign Evolved skull",                    verified = true },
+    { id = "Temperamental",     name = "Temperamental",     desc = "Campaign Evolved skull",                    verified = true },
+    { id = "FloorIsLava",       name = "Floor Is Lava",     desc = "Campaign Evolved skull",                    verified = true },
+    { id = "Magnified",         name = "Magnified",         desc = "Campaign Evolved skull",                    verified = true },
+    { id = "JohnnyAmmoTree",    name = "Johnny Ammo Tree",  desc = "Campaign Evolved skull",                    verified = true },
+    { id = "Leadhead",          name = "Leadhead",          desc = "Campaign Evolved skull",                    verified = true },
+    { id = "Efficient",         name = "Efficient",         desc = "Campaign Evolved skull",                    verified = true },
 }
 
--- Visibility modifier, one per floor, not cumulative. Campaign Remix rolls
--- Spore/Nightvision automatically on deploy; "Default" means the mod must
--- suppress/ignore the roll if that turns out to be possible (§7.3).
+-- Visibility modifier, one per floor, not cumulative. These are real skulls in
+-- EBlamGameSkulls (SporeVisibility=39, NightVision=40, LightsOut=41, confirmed
+-- on-device), kept out of SKULL_POOL so exactly one is rolled per floor.
+-- "default" carries no skull: the floor runs with normal visibility.
 Const.VISIBILITY_MODIFIERS = {
-    { id = "default",    name = "Default" },
-    { id = "spore",      name = "Spore Visibility" },
-    { id = "nightvision", name = "Nightvision" },
+    { id = "default",         name = "Default",          skull = nil },
+    { id = "SporeVisibility", name = "Spore Visibility", skull = "SporeVisibility" },
+    { id = "NightVision",     name = "Nightvision",      skull = "NightVision" },
+    { id = "LightsOut",       name = "Lights Out",       skull = "LightsOut" },
 }
 
 Const.FLOORS_PER_RUN = 5
