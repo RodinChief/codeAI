@@ -299,11 +299,20 @@ check(summary:match("HALO%-7K2M%-QX9") ~= nil, "ui: summary shows seed")
 check(summary:match("Time: 1:02:05") ~= nil, "ui: summary elapsed time")
 check(summary:match("Iron") ~= nil, "ui: summary lists skulls")
 
--- Panel renders in every mode without erroring.
-for _, mode in ipairs({ "menu", "confirm_new_run", "run", "summary" }) do
+-- Panel renders in every mode without erroring — AND with actual content.
+-- A mode that only compact_lines knew about ("floors" vs a stale "run")
+-- rendered nothing but the panel border on-device, which is how the empty
+-- ╔═╗/╚═╝ pairs got into the 2026-07-29 log.
+local MODES = { "menu", "confirm_new_run", "floors", "summary" }
+for _, mode in ipairs(MODES) do
     Ui.mode = mode
-    local ok, err = pcall(Ui.panel_lines, { mission_launch = false })
-    check(ok, "ui: panel_lines mode " .. mode .. " (" .. tostring(err) .. ")")
+    local ok, lines = pcall(Ui.panel_lines, { mission_launch = false })
+    check(ok, "ui: panel_lines mode " .. mode .. " (" .. tostring(lines) .. ")")
+    check(ok and #lines > 2,
+        "ui: panel_lines mode " .. mode .. " renders more than the border")
+    local ok2, cl2 = pcall(Ui.compact_lines)
+    check(ok2 and #cl2 > 0,
+        "ui: compact_lines mode " .. mode .. " renders rows")
 end
 
 -- compact_lines drives the in-menu submenu; the ▶/◀ prefixes are the contract

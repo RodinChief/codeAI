@@ -22,7 +22,10 @@ local Presets = require("presets")
 local Ui = {}
 
 Ui.visible = false
--- Panel modes: "menu" | "confirm_new_run" | "run" | "summary"
+-- Panel modes: "menu" | "confirm_new_run" | "floors" | "summary".
+-- These names are shared with compact_lines (the in-menu rows); a mode that
+-- only one of the two knew about rendered an empty panel and a row list that
+-- changed length under the player's focus (on-device 2026-07-29).
 Ui.mode = "menu"
 -- Transient notice line (errors, capability warnings).
 Ui.notice = nil
@@ -156,16 +159,26 @@ function Ui.summary_lines()
     return lines
 end
 
+-- The mode actually rendered. "floors" and "summary" both need a run; without
+-- one they fall back to the root screen, so the panel and the in-menu rows can
+-- never disagree about which screen is showing.
+local function effective_mode()
+    local m = Ui.mode
+    if (m == "floors" or m == "summary") and not State.run then return "menu" end
+    return m
+end
+
 -- Whole panel as lines (used verbatim by the text backend; the ImGui backend
 -- renders the same view model with widgets).
 function Ui.panel_lines(capability_status)
+    local mode = effective_mode()
     local k = Config.keys
     local lines = { "╔═ HALO ROGUELIKE ═════════════════════" }
     local function add(l) lines[#lines + 1] = l end
 
     if Ui.notice then add("‼ " .. Ui.notice) end
 
-    if Ui.mode == "menu" then
+    if mode == "menu" then
         add("  ▶ Select ROGUELIKE in the main menu to "
             .. ((State.run and State.run.status == State.STATUS.ACTIVE)
                 and "resume the run" or "start a new run"))
@@ -174,14 +187,14 @@ function Ui.panel_lines(capability_status)
                 State.run.current_floor, Const.FLOORS_PER_RUN, State.run.seed))
         end
         add("  Exit mode (restore save): " .. k.exit_mode .. " key")
-    elseif Ui.mode == "confirm_new_run" then
+    elseif mode == "confirm_new_run" then
         add("  STARTING A RUN WILL:")
         add("   • back up, then OVERWRITE your solo campaign save (New Game)")
         add("   • very likely DISABLE ACHIEVEMENTS while modifiers are active")
         add("  Your save is restored and modifiers cleared when you exit the mode.")
         add("  ▶ Confirm with the YES row in the ROGUELIKE menu")
         add("  ◀ Cancel with the NO row (or the " .. k.toggle_overlay .. " key)")
-    elseif Ui.mode == "run" and State.run then
+    elseif mode == "floors" and State.run then
         local run = State.run
         add("  Seed: " .. run.seed .. "   " .. (Ui.corner_counter() or ""))
         add("")
@@ -202,7 +215,7 @@ function Ui.panel_lines(capability_status)
             add("  (launch call unresolved: start the mission manually with the")
             add("   settings above; skulls via debug menu 'G' — see README)")
         end
-    elseif Ui.mode == "summary" then
+    elseif mode == "summary" then
         for _, l in ipairs(Ui.summary_lines()) do add(l) end
         add("  ▶ Select CLOSE RUN in the ROGUELIKE menu (restores save)")
     end
@@ -297,8 +310,9 @@ end
 
 function Ui.compact_lines()
     local run = State.run
+    local mode = effective_mode()
 
-    if Ui.mode == "confirm_new_run" then
+    if mode == "confirm_new_run" then
         return {
             "START RUN? Your save is backed up first, then overwritten",
             "Achievements likely OFF until you exit the mode",
@@ -307,7 +321,7 @@ function Ui.compact_lines()
         }
     end
 
-    if Ui.mode == "summary" and run then
+    if mode == "summary" and run then
         local verdict = run.status == State.STATUS.WON and "RUN WON"
             or run.status == State.STATUS.LOST and "RUN LOST" or "RUN ENDED"
         return {
@@ -318,7 +332,7 @@ function Ui.compact_lines()
     end
 
     -- Floor select: the mission-select-style screen.
-    if Ui.mode == "floors" and run then
+    if mode == "floors" and run then
         local in_mission = run.floor_status ~= State.FLOOR.BRIEFING
         local lines = {
             string.format("%s  ·  %s", run.seed, Ui.corner_counter() or ""),

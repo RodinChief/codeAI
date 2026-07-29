@@ -391,6 +391,10 @@ end
 -- ever loaded (main.lua's watchdog): later launches skip that path and use
 -- the known-good main-menu launch instead of failing the same way forever.
 local campmenu_distrusted = false
+-- One-shot: the campaign asset's own property list, logged on the first launch.
+local campaign_data_dumped = false
+-- Forward declaration; defined in the skull-writing section below.
+local describe_container
 function Gameapi.distrust_campmenu_launch()
     if not campmenu_distrusted then
         campmenu_distrusted = true
@@ -505,6 +509,17 @@ local function scenario_game_options(diff_index, rally_index, skull_values)
     return opts
 end
 
+-- Rally point <-> InsertionPoint index. Insertion points are per-scenario AND
+-- gated by campaign progress, so a valid-looking index can still be refused;
+-- launch_floor walks this list downwards until one is accepted.
+local RALLY_ORDER = { "Alpha", "Bravo", "Charlie", "Delta" }
+local RALLY_INDEX = { Alpha = 0, Bravo = 1, Charlie = 2, Delta = 3 }
+
+function Gameapi.rally_name(index)
+    return RALLY_ORDER[(tonumber(index) or 0) + 1]
+end
+
+-- Returns: ok, err, rally_index_actually_used.
 function Gameapi.launch_floor(floor, active_skulls)
     Log.info("gameapi: launch request — mission=%s rally=%s difficulty=%s skulls=[%s]",
         floor.mission_id, floor.rally, floor.difficulty,
@@ -521,10 +536,23 @@ function Gameapi.launch_floor(floor, active_skulls)
 
     local diff_index = ({ Easy = 0, Normal = 1, Heroic = 2, Legendary = 3 })
         [floor.difficulty] or 1
-    local rally_index = ({ Alpha = 0, Bravo = 1, Charlie = 2, Delta = 3 })
-        [floor.rally] or 0
+    local rally_index = RALLY_INDEX[floor.rally] or 0
 
     local cd = Gameapi.find_campaign_data()
+    if cd and not campaign_data_dumped then
+        campaign_data_dumped = true
+        dump_props(cd, "CampaignData " .. full_name(cd))
+        -- The scenario list is what decides whether a scenario name like "a10"
+        -- is even part of this campaign. Whichever of these fields exists gets
+        -- logged so a refused launch can be told apart from a bad name.
+        for _, prop in ipairs({ "Scenarios", "ScenarioList", "Missions",
+            "CampaignScenarios", "ScenarioNames" }) do
+            local arr = try("read " .. prop, function() return cd[prop] end)
+            if arr ~= nil then
+                Log.discover("CD.%s = %s", prop, describe_container(arr))
+            end
+        end
+    end
 
     -- PRIMARY PATH (from the reflection dump): drive the campaign subsystem
     -- directly, so the rally point and difficulty travel WITH the launch
@@ -536,27 +564,52 @@ function Gameapi.launch_floor(floor, active_skulls)
             skull_vals and ("[" .. table.concat(skull_vals, ",") .. "]")
             or "none yet (Campaign Remix keeps its own skulls)")
 
-        -- With skulls first; if the TSet cannot be marshalled from a Lua
-        -- table the same call is retried without them, so a skull problem
-        -- can never cost the launch itself.
-        local attempts = {}
+        -- SetAndBeginCampaign RETURNS A BOOL. pcall succeeding only means no
+        -- Lua error was raised — on-device (2026-07-29) launching a10 at
+        -- InsertionPoint 2 logged "OK" and loaded nothing at all, because the
+        -- engine had returned false. The return value is now the verdict.
+        --
+        -- A refused insertion point is the likeliest reason: they are
+        -- per-scenario and gated by campaign progress, and a run starts from a
+        -- fresh save where the later rally points are not unlocked yet. So the
+        -- rally point walks downwards until one is accepted, and the floor is
+        -- told which one actually ran.
+        --
+        -- With skulls first; if the TSet cannot be marshalled from a Lua table
+        -- the same call is retried without them, so a skull problem can never
+        -- cost the launch itself.
+        local variants = {}
         if skull_vals then
-            attempts[#attempts + 1] = { desc = "with skulls",
-                opts = scenario_game_options(diff_index, rally_index, skull_vals) }
+            variants[#variants + 1] = { desc = "with skulls", skulls = skull_vals }
         end
-        attempts[#attempts + 1] = { desc = "no skulls",
-            opts = scenario_game_options(diff_index, rally_index, nil) }
+        variants[#variants + 1] = { desc = "no skulls", skulls = nil }
 
-        for _, a in ipairs(attempts) do
-            local ok, err = pcall(function()
-                return flow:SetAndBeginCampaign(cd, FName(scen), a.opts)
-            end)
-            Log.discover("launch: SetAndBeginCampaign(%q, {diff=%d, rally=%d, %s}) -> %s",
-                scen, diff_index, rally_index, a.desc,
-                ok and "OK" or tostring(err))
-            if ok then return true end
+        for rally = rally_index, 0, -1 do
+            for _, v in ipairs(variants) do
+                local opts = scenario_game_options(diff_index, rally, v.skulls)
+                local ok, ret = pcall(function()
+                    return flow:SetAndBeginCampaign(cd, FName(scen), opts)
+                end)
+                -- nil = this UE4SS build did not surface a return value; treat
+                -- that as accepted (the watchdog still catches a silent no-op).
+                local accepted = ok and ret ~= false
+                Log.discover("launch: SetAndBeginCampaign(%q, {diff=%d, rally=%d, %s}) -> %s",
+                    scen, diff_index, rally, v.desc,
+                    ok and ("returned " .. tostring(ret))
+                        or ("ERROR " .. tostring(ret)))
+                if accepted then
+                    if rally ~= rally_index then
+                        Log.warn("gameapi: rally point %s was REFUSED for %s — "
+                            .. "launched at rally %s instead",
+                            Gameapi.rally_name(rally_index), scen,
+                            Gameapi.rally_name(rally))
+                    end
+                    return true, nil, rally
+                end
+            end
         end
-        Log.discover("launch: subsystem path failed — falling back to the menu call")
+        Log.discover("launch: subsystem refused every rally point — falling back "
+            .. "to the menu call")
     else
         Log.discover("launch: campaign flow subsystem %s, campaign data %s",
             flow and "found" or "MISSING", cd and "found" or "MISSING")
@@ -687,7 +740,7 @@ function Gameapi.launch_floor(floor, active_skulls)
         end)
         Log.discover("launch: CampaignMenu.LaunchCampaignMap(%s, rally %d) -> %s",
             mapinfo.name, rally_index, okm and "OK" or tostring(errm))
-        if okm then return true end
+        if okm then return true, nil, rally_index end
     elseif not mapinfo then
         Log.discover("launch: no MapInfo asset matched %q — rally point "
             .. "cannot be applied on this path", id_up)
@@ -701,7 +754,7 @@ function Gameapi.launch_floor(floor, active_skulls)
         end)
         Log.discover("launch: LaunchCampaignMap(%s, %q) -> %s",
             full_name(cd), scen, ok and "OK" or tostring(err))
-        if ok then return true end
+        if ok then return true, nil, 0 end -- no rally point on this path
     else
         Log.discover("launch: CampaignData asset not found — using direct map travel")
     end
@@ -721,7 +774,7 @@ function Gameapi.launch_floor(floor, active_skulls)
         end)
         Log.discover("launch: OpenLevel(%q) -> %s", map,
             ok2 and "OK" or tostring(err2))
-        if ok2 then return true end
+        if ok2 then return true, nil, 0 end
         return false, "OpenLevel failed: " .. tostring(err2)
     end
     return false, "no launch path worked (LaunchCampaignMap + OpenLevel both failed)"
@@ -914,7 +967,7 @@ end
 
 -- Describe an unknown container value: Lua type, length via whichever
 -- accessor exists, and its elements when they can be read.
-local function describe_container(v)
+function describe_container(v)
     if v == nil then return "nil" end
     local t = type(v)
     local parts = { t }

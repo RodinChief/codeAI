@@ -39,6 +39,18 @@ local last_world = nil
 -- the launch failed.
 local mission_seen_since_launch = false
 
+-- True between issuing a launch and the mission world showing up. While it is
+-- set, the intermediate loading worlds the engine passes through must not be
+-- mistaken for "we are back in the menus".
+local launch_pending = false
+
+-- Re-render the in-menu rows right now instead of waiting for the next
+-- one-second tick. Every screen change calls this, so the rows a player sees
+-- always belong to the screen they just chose.
+local function push_rows()
+    pcall(function() Menuinject.set_status_lines(Ui.compact_lines()) end)
+end
+
 -- ------------------------------------------------------------- floor flow
 
 local function handle_run_ended()
@@ -105,13 +117,31 @@ local function start_current_floor()
 
     local skulls = State.active_skulls()
     mission_seen_since_launch = false
-    local ok, err = Gameapi.launch_floor(fl, skulls)
+    launch_pending = true
+    local ok, err, rally_used = Gameapi.launch_floor(fl, skulls)
+    launch_pending = ok and true or false
     if ok then
         Ui.set_notice(nil)
+        -- The engine can refuse a rally point (they are per-scenario and gated
+        -- by campaign progress), in which case launch_floor drops to a lower
+        -- one. Record what actually ran so the floor card stops promising a
+        -- rally point the player never got.
+        local landed = rally_used and Gameapi.rally_name(rally_used)
+        if landed and landed ~= fl.rally then
+            Ui.set_notice(string.format(
+                "Rally Point %s was refused for this mission — floor launched "
+                .. "at Rally Point %s", fl.rally, landed))
+            fl.rally = landed
+            State.save()
+        end
         -- Restore the main menu before the mission takes over: leftover
         -- visible/focusable mod rows in the persistent widget tree steal
         -- controller focus in-game (symptom: pause menu never shows).
         Menuinject.close()
+        -- ...and keep it closed. Closing the submenu hands focus back to the
+        -- ROGUELIKE entry, whose dwell timer then re-opened the submenu on top
+        -- of the loading mission and activated a row nobody picked.
+        Menuinject.suspend(20000)
         -- Watchdog: a launch call can report OK yet load nothing (seen
         -- on-device with a wrong CampaignData asset). The check asks the
         -- engine which world is loaded rather than trusting a map-load hook —
@@ -132,6 +162,8 @@ local function start_current_floor()
                     State.save()
                     Ui.set_notice("Launch did not take — select the floor again")
                     Ui.dirty()
+                    launch_pending = false
+                    pcall(Menuinject.resume)
                 else
                     Log.info("main: mission world confirmed loaded (%s)",
                         tostring(Gameapi.current_world_name()))
@@ -247,6 +279,7 @@ local function on_menu_row(text)
     end
     Ui.visible = true
     Ui.dirty()
+    push_rows()
 end
 
 -- F5 keeps working as a shortcut for "the obvious thing on this screen".
@@ -336,15 +369,15 @@ local function finish_init(build_ok, build)
     -- rows are hidden and replaced by the mod's rows (menuinject). Fires when
     -- the submenu opens — sync the UI mode to the run state.
     Menuinject.start(function()
-        if State.run and State.run.status ~= State.STATUS.ACTIVE then
-            Ui.mode = "summary"
-        elseif State.run then
-            Ui.mode = "run"
-        else
-            Ui.mode = "menu"
-        end
+        -- Opening ROGUELIKE always lands on the root screen (START NEW RUN /
+        -- CONTINUE PREVIOUS RUN), which is what the player asked for. It used
+        -- to jump straight to a mode named "run" that no screen implemented,
+        -- so the rows rendered for the previous screen and then collapsed to
+        -- three a second later — the "menu glitches" of 2026-07-29.
+        Ui.mode = "menu"
         Ui.visible = true
         Ui.dirty()
+        push_rows()
     end)
     -- Submenu row activated. "◀" rows go back (menuinject already restored
     -- the main menu); "▶" rows are the primary action for the current mode:
@@ -357,6 +390,7 @@ local function finish_init(build_ok, build)
                 or Ui.mode == "confirm_new_run" then
                 Ui.mode = "menu"
                 Ui.dirty()
+                push_rows()
                 Menuinject.reopen()
             else
                 Ui.visible = false
@@ -436,7 +470,14 @@ function watch_world()
     pcall(Menuinject.close)
 
     local entering_mission = world:find("/Solo/", 1, true) ~= nil
+    if not entering_mission and not launch_pending then
+        -- Back in the menus for real: whatever launch suspension was in force
+        -- is over. Skipped while a launch is pending, because the engine
+        -- travels through non-mission worlds on the way in.
+        pcall(Menuinject.resume)
+    end
     if entering_mission then
+        launch_pending = false
         mission_seen_since_launch = true
         -- Skulls are applied here, not at launch: in a live mission they are
         -- gameplay TAGS on the skulls component, not the enum values the

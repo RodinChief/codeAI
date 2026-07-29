@@ -90,6 +90,19 @@ local pending_lines = nil  -- latest lines from ui.compact_lines
 local last_status = nil
 local saved_vis = {}       -- { {widget=w, vis=n}, ... } of hidden game rows
 
+-- Bumped every time the row set changes. Dwell counting restarts on a bump:
+-- the row list is re-rendered once a second and switching screens changes both
+-- its length and the text of each row, so without this the row that happened
+-- to be under the player's focus fired an action they never chose (on-device
+-- 2026-07-29: the floor list collapsed to the root screen and "CONTINUE
+-- PREVIOUS RUN" activated itself).
+local rows_generation = 0
+
+-- Ticks of the watcher during which nothing can activate. Set while a mission
+-- launch is in flight, so the submenu does not pop straight back open over the
+-- loading mission and start eating inputs.
+local suspend_ticks = 0
+
 -- Log only when the message changes, so the 5s retry loop stays quiet.
 local function log_state(fmt, ...)
     local msg = string.format(fmt, ...)
@@ -226,6 +239,7 @@ local function apply_pending_rows()
         row_texts[i] = nil
     end
     last_status = blob
+    rows_generation = rows_generation + 1
 end
 
 -- Open the submenu: collapse every game-owned row in the menu list (saving
@@ -275,18 +289,25 @@ local function reset_all()
     saved_vis = {}
     submenu_open = false
     last_status = nil
+    focused_text = nil
 end
 
 -- ------------------------------------------------------------- activation
 
 local function activate_open()
+    if suspend_ticks > 0 then return end
     ExecuteInGameThread(function()
-        open_submenu()
+        -- Callback FIRST: it picks the screen and pushes the matching rows, so
+        -- the submenu opens already showing them. Opening first meant the rows
+        -- of whatever screen was last displayed appeared for up to a second
+        -- and were then swapped out under the player's hands.
         if on_activate then on_activate() end
+        open_submenu()
     end)
 end
 
 local function activate_row(i)
+    if suspend_ticks > 0 then return end
     local text = row_texts[i]
     if not text then return end
     local first = text:sub(1, #"▶")
@@ -358,6 +379,11 @@ local function focused(widget)
 end
 
 local dwell_target, dwell_ticks, dwell_fired = nil, 0, false
+local dwell_text, dwell_gen = nil, 0
+-- The row that just fired. It cannot fire again until focus moves off it,
+-- which is what keeps one activation from cascading into the next as the
+-- screen behind the focus is redrawn.
+local locked_target = nil
 local function start_watcher()
     if watcher_started then return end
     watcher_started = true
@@ -367,6 +393,11 @@ local function start_watcher()
                 watcher_started = false
                 reset_all()
                 return true -- attempt loop re-injects on the next pass
+            end
+            if suspend_ticks > 0 then
+                suspend_ticks = suspend_ticks - 1
+                dwell_target, dwell_ticks, dwell_fired = nil, 0, false
+                return false
             end
             -- Which of our widgets has focus right now?
             local target = nil
@@ -380,12 +411,22 @@ local function start_watcher()
                     end
                 end
             end
-            if target ~= dwell_target then
+            local text = (type(target) == "number") and row_texts[target] or nil
+            -- Dwell only counts while the SAME row keeps the SAME text and the
+            -- row set has not been re-rendered underneath it. Any of those
+            -- changing restarts the count — that is what stops a screen switch
+            -- from activating whatever row slid under the player's focus.
+            if target ~= dwell_target or text ~= dwell_text
+                or rows_generation ~= dwell_gen then
+                -- Moving off a row is what unlocks it again; a row whose text
+                -- merely changed stays locked, so activating it never chains
+                -- into activating whatever replaces it.
+                if target ~= dwell_target then locked_target = nil end
                 dwell_target, dwell_ticks, dwell_fired = target, 0, false
+                dwell_text, dwell_gen = text, rows_generation
                 -- Report the highlighted row so the UI can fill its detail
                 -- panel, the way the game's own Mission Select describes the
                 -- mission you are pointing at.
-                local text = (type(target) == "number") and row_texts[target] or nil
                 if text ~= focused_text then
                     focused_text = text
                     if on_row_focus then
@@ -396,8 +437,9 @@ local function start_watcher()
                 dwell_ticks = dwell_ticks + 1
                 local need = (target == "entry") and DWELL_OPEN_TICKS
                     or DWELL_ROW_TICKS
-                if dwell_ticks >= need then
+                if dwell_ticks >= need and target ~= locked_target then
                     dwell_fired = true
+                    locked_target = target
                     if target == "entry" then
                         if not submenu_open then
                             Log.info("menuinject: ROGUELIKE focused — opening submenu")
@@ -450,6 +492,114 @@ end
 
 function Menuinject.close()
     close_submenu()
+end
+
+-- Ignore every activation path for `ms` milliseconds. Used while a mission
+-- launch is in flight: the submenu is closed at that moment, focus falls back
+-- onto the ROGUELIKE entry, and without this the dwell watcher re-opened the
+-- submenu on top of the loading mission a second later.
+function Menuinject.suspend(ms)
+    suspend_ticks = math.max(suspend_ticks, math.ceil((ms or 0) / 250))
+    Log.info("menuinject: activation suspended for %dms", ms or 0)
+end
+
+-- Lift a suspension early — used when the game lands back in the menus, so a
+-- launch that never took does not leave the entry dead for the full timeout.
+function Menuinject.resume()
+    if suspend_ticks > 0 then
+        suspend_ticks = 0
+        Log.info("menuinject: activation resumed")
+    end
+end
+
+-- ------------------------------------------------------------- ordering
+
+local function children_of(parent)
+    local out = {}
+    local n = try(function() return parent:GetChildrenCount() end) or 0
+    for i = 0, n - 1 do
+        local ch = try(function() return parent:GetChildAt(i) end)
+        if is_valid(ch) then out[#out + 1] = ch end
+    end
+    return out
+end
+
+-- Append a widget. The container's own AddChildToButtonContainer is preferred
+-- (it is how HaloUIButtonContainer registers a row with its button group, per
+-- the on-device function dump); AddChild is the UPanelWidget fallback.
+local function add_child(parent, w)
+    return try(function() parent:AddChildToButtonContainer(w) return true end)
+        or try(function() parent:AddChild(w) return true end)
+        or false
+end
+
+-- Move `clone` to sit directly below `template` (CAMPAIGN REMIX).
+--
+-- HaloUIButtonContainer exposes no reorder call — its full function list, read
+-- on-device, is SetInitialFocus, SelectPreviousButton, SelectNextButton,
+-- SelectInitialChild, ReplaceButtonContainerChildAt, HandleButtonGroup-
+-- SelectionChanged, GetSelectedButton, GetLastChild, GetFocusableWidget,
+-- GetFirstChild, AddChildToButtonContainer — and UPanelWidget::ShiftChild is
+-- not BlueprintCallable, so reflection cannot reach it either.
+--
+-- The one ordering primitive available is "remove, then add", because adding
+-- appends. So the rows BETWEEN Campaign Remix and our entry are rotated to the
+-- back, which leaves their relative order intact:
+--     [.. Remix, Customization, Quit, ROGUELIKE]
+--  -> [.. Remix, ROGUELIKE, Customization, Quit]
+--
+-- A botched reorder once made the ROGUELIKE entry vanish outright, so the
+-- child list is snapshotted first and anything that goes missing is put back.
+-- Ending up one row lower is cosmetic; losing a row is not.
+local function place_under(parent, template, clone)
+    local before = children_of(parent)
+    local t_idx, c_idx
+    for i, w in ipairs(before) do
+        if addr(w) == addr(template) then t_idx = i end
+        if addr(w) == addr(clone) then c_idx = i end
+    end
+    if not (t_idx and c_idx) then return false, "template or entry not in the list" end
+    if c_idx == t_idx + 1 then return true, "already in place" end
+
+    local movers = {}
+    for i = t_idx + 1, #before do
+        if i ~= c_idx then movers[#movers + 1] = before[i] end
+    end
+    for _, w in ipairs(movers) do
+        -- Anything other than a confirmed removal stops the rotation right
+        -- there: a half-applied move is repaired below, a guessed one is not.
+        if try(function() return parent:RemoveChild(w) end) ~= true then break end
+        if not add_child(parent, w) then break end
+    end
+
+    -- Repair pass: whatever fell out of the list goes back on the end. This is
+    -- append-only, so it can never make the menu emptier than it found it.
+    local present = {}
+    for _, w in ipairs(children_of(parent)) do present[addr(w)] = true end
+    local restored = 0
+    for _, w in ipairs(before) do
+        if not present[addr(w)] then
+            add_child(parent, w)
+            restored = restored + 1
+        end
+    end
+
+    local after = children_of(parent)
+    local now
+    for i, w in ipairs(after) do if addr(w) == addr(clone) then now = i end end
+    if restored > 0 then
+        return false, string.format("%d row(s) dropped out and were re-appended",
+            restored)
+    end
+    if #after ~= #before then
+        return false, string.format("child count changed %d -> %d",
+            #before, #after)
+    end
+    local t_now
+    for i, w in ipairs(after) do if addr(w) == addr(template) then t_now = i end end
+    if now and t_now and now == t_now + 1 then return true, "moved" end
+    return false, string.format("ended at %s, wanted %s",
+        tostring(now), tostring(t_now and t_now + 1))
 end
 
 -- Is the entry both alive AND still hanging in the menu list? A widget can
@@ -525,54 +675,21 @@ local function attempt()
         return false
     end
 
-    local added = try(function() return parent:AddChild(clone) end)
-    if not added then
-        Log.discover("menuinject: parent:AddChild failed (panel class: %s)",
+    if not add_child(parent, clone) then
+        Log.discover("menuinject: could not add the entry (panel class: %s)",
             full_name(try(function() return parent:GetClass() end) or "?"))
         return false
     end
 
-    -- Try to sit directly below CAMPAIGN REMIX. AddChild appends to the end,
-    -- so the entry would have to be moved up — but the container here is
-    -- HaloUIButtonContainer, whose ordering API is unknown.
-    --
-    -- Reordering is therefore attempted ONLY with non-destructive calls. An
-    -- earlier version fell back to RemoveChild + InsertChildAt; the insert
-    -- failed, the remove had already happened, and the ROGUELIKE entry
-    -- vanished from the menu entirely (on-device 2026-07-29, "got -1").
-    -- Being one row lower is a cosmetic flaw; losing the entry is not.
-    local want = try(function() return parent:GetChildIndex(template) end)
-    if type(want) == "number" and want >= 0 then
-        want = want + 1
-        local moved = try(function()
-            parent:ShiftChild(want, clone) return true
-        end) or try(function()
-            parent:ShiftChild(clone, want) return true
-        end)
-        local now = try(function() return parent:GetChildIndex(clone) end)
-        -- Whatever happened above, the entry MUST still be in the list.
-        if type(now) ~= "number" or now < 0 then
-            try(function() parent:AddChild(clone) return true end)
-            now = try(function() return parent:GetChildIndex(clone) end)
-            Log.discover("menuinject: re-attached entry after a failed move")
-        end
-        Log.discover("menuinject: position -> wanted %d, at %s (move=%s, panel=%s)",
-            want, tostring(now), moved and "ok" or "unavailable",
-            full_name(try(function() return parent:GetClass() end) or "?")
-                :gsub("^%S+%s", ""))
-        -- Log the container's own API once, so the right ordering call can be
-        -- found instead of guessed: HaloUI is not in the reflection dumps.
-        if not moved then
-            local cls = try(function() return parent:GetClass() end)
-            local fns = {}
-            if cls then
-                pcall(function()
-                    cls:ForEachFunction(function(fn) fns[#fns + 1] = fstr(fn:GetFName()) end)
-                end)
-            end
-            Log.discover("menuinject: container functions: %s",
-                #fns > 0 and table.concat(fns, ", ") or "(none exposed)")
-        end
+    -- Sit directly below CAMPAIGN REMIX, as asked for.
+    local moved, why = place_under(parent, template, clone)
+    Log.info("menuinject: position under CAMPAIGN REMIX -> %s (%s)",
+        moved and "ok" or "NOT moved", tostring(why))
+    -- Whatever happened above, the entry MUST still be in the list.
+    local at = try(function() return parent:GetChildIndex(clone) end)
+    if type(at) ~= "number" or at < 0 then
+        add_child(parent, clone)
+        Log.warn("menuinject: re-attached the entry after the move")
     end
 
     hook_clicks()
