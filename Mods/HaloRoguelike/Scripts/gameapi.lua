@@ -966,83 +966,155 @@ local function skulls_component()
     return nil
 end
 
--- Try to force the run's skulls onto the live mission. Returns true only when
--- a read-back confirms the values actually landed.
-function Gameapi.apply_skulls_in_mission(values)
-    if not values or #values == 0 then return false end
+-- CONFIRMED on-device 2026-07-29: writing the component's ActiveSkulls with a
+-- number list failed with
+--   "Can't copy struct of type None into GameplayTagContainer
+--    Property: BlamSkullsGameStateComponent:ActiveSkulls"
+-- In a live mission skulls are GAMEPLAY TAGS, not EBlamGameSkulls values —
+-- which is also why OnSkullsAdded/Removed take an FGameplayTagContainer.
+-- Sending enum numbers could never have worked.
+
+local tag_lib_logged = false
+local function tag_library()
+    local lib = try("find BlueprintGameplayTagLibrary", StaticFindObject,
+        "/Script/GameplayTags.Default__BlueprintGameplayTagLibrary")
+    if lib and lib:IsValid() and not tag_lib_logged then
+        tag_lib_logged = true
+        local fns = {}
+        pcall(function()
+            lib:GetClass():ForEachFunction(function(fn)
+                fns[#fns + 1] = fstr(fn:GetFName())
+            end)
+        end)
+        Log.discover("tags: BlueprintGameplayTagLibrary functions: %s",
+            #fns > 0 and table.concat(fns, ", ") or "(none)")
+    end
+    return lib
+end
+
+-- Read a tag container's contents. The exact break-out API varies, so several
+-- are tried; whichever answers gives the real tag names, which is what the
+-- skull ids have to be translated into.
+local function read_tag_container(container)
+    if container == nil then return nil end
+    local lib = tag_library()
+    if not (lib and lib:IsValid()) then return nil end
+    local out = {}
+    local ok = pcall(function()
+        local res = {}
+        lib:BreakGameplayTagContainer(container, res)
+        local arr = res.GameplayTags or res[1]
+        if arr == nil then for _, v in pairs(res) do arr = v break end end
+        local n = try("len", function() return arr:GetArrayNum() end)
+            or try("#", function() return #arr end) or 0
+        for i = 1, n do
+            local tag = arr[i]
+            local name = try("TagName", function() return fstr(tag.TagName) end)
+                or try("tostring", function() return fstr(tag) end)
+            out[#out + 1] = tostring(name)
+        end
+    end)
+    if ok and #out > 0 then return out end
+    return nil
+end
+
+-- Log which gameplay tags the game currently has active. This is the naming
+-- scheme the mod must produce (e.g. "Skull.Iron" vs "Blam.Skull.Iron"), and
+-- it can only be learned from a live mission.
+function Gameapi.dump_skull_tags()
+    local comp = skulls_component()
+    if not comp then
+        Log.discover("tags: no live BlamSkullsGameStateComponent")
+        return nil
+    end
+    tag_library()
+    local container = try("read ActiveSkulls", function() return comp.ActiveSkulls end)
+    Log.discover("tags: ActiveSkulls raw = %s", describe_container(container))
+    local names = read_tag_container(container)
+    if names then
+        Log.discover("tags: ACTIVE SKULL TAGS (%d): %s", #names,
+            table.concat(names, ", "))
+    else
+        Log.discover("tags: could not break the container into tags — the "
+            .. "library's function list above shows what is callable")
+    end
+    -- Any gameplay tag mentioning a skull, wherever it lives.
+    local hits = scan_multi({ "Skull" }, 40)
+    local shown = 0
+    for _, e in ipairs(hits.Skull or {}) do
+        if e.name:find("Tag", 1, true) then
+            Log.discover("tags: candidate %s", e.name)
+            shown = shown + 1
+        end
+    end
+    if shown == 0 then Log.discover("tags: no skull-tag objects found by scan") end
+    return names
+end
+
+-- Force the run's skulls onto the live mission by writing gameplay tags.
+-- `values` are enum numbers (kept for the launch path); `ids` are the mod's
+-- skull ids, which map onto tag names. Returns true only when a read-back
+-- confirms the tags actually landed.
+function Gameapi.apply_skulls_in_mission(values, ids)
     local comp = skulls_component()
     if not comp then
         Log.discover("skullwrite: no live BlamSkullsGameStateComponent found")
         return false
     end
     Log.discover("skullwrite: component %s", full_name(comp))
-    local before = try("read ActiveSkulls", function() return comp.ActiveSkulls end)
-    Log.discover("skullwrite: ActiveSkulls BEFORE = %s", describe_container(before))
 
-    -- Does the read-back contain every value we want?
-    local function verify()
-        local after = try("read ActiveSkulls", function() return comp.ActiveSkulls end)
-        local desc = describe_container(after)
-        local hit = 0
-        for _, want in ipairs(values) do
-            if desc:find("," .. want .. ",", 1, true)
-                or desc:find("{" .. want .. ",", 1, true)
-                or desc:find("," .. want .. "}", 1, true)
-                or desc:find("{" .. want .. "}", 1, true) then
-                hit = hit + 1
-            end
-        end
-        return hit, desc
+    -- What is in there right now, and under what naming scheme?
+    local current = Gameapi.dump_skull_tags()
+    if not ids or #ids == 0 then return false end
+
+    -- Derive the tag prefix from a tag that is already active, so the scheme
+    -- comes from the game rather than a guess. Falls back to the common
+    -- candidates when nothing is active yet.
+    local prefixes = {}
+    if current and current[1] then
+        local pfx = current[1]:match("^(.*)%.[^.]+$")
+        if pfx then prefixes[#prefixes + 1] = pfx .. "." end
+    end
+    for _, p in ipairs({ "Skull.", "Blam.Skull.", "Game.Skull.", "" }) do
+        prefixes[#prefixes + 1] = p
     end
 
-    -- Shape 1: plain Lua array of enum values.
-    local attempts = {
-        { desc = "array", build = function() return values end },
-        -- Shape 2: set-style table (value -> true), which some marshallers
-        -- expect for TSet.
-        { desc = "keyed table", build = function()
-            local t = {}
-            for _, v in ipairs(values) do t[v] = true end
-            return t
-        end },
-        -- Shape 3: reuse a real TSet produced by the game, mutated in place
-        -- if it exposes an Add-style method.
-        { desc = "game-built set", build = function()
-            local bpfl = try("find BPFL", StaticFindObject,
-                BPFL_PATH:gsub("BPFL_CampaignMenuHelpers_C$",
-                    "Default__BPFL_CampaignMenuHelpers_C"))
-            if not (bpfl and bpfl:IsValid()) then return nil end
+    local lib = tag_library()
+    if not (lib and lib:IsValid()) then
+        Log.warn("skullwrite: BlueprintGameplayTagLibrary unavailable")
+        return false
+    end
+
+    for _, prefix in ipairs(prefixes) do
+        local tags = {}
+        for _, id in ipairs(ids) do tags[#tags + 1] = { TagName = prefix .. id } end
+        local ok, err = pcall(function()
             local out = {}
-            pcall(function() bpfl:GetRemixSkullsSet(comp, out) end)
-            local set = out.RemixSkull or out[1]
-            if set == nil then for _, v in pairs(out) do set = v break end end
-            if set == nil then return nil end
-            Log.discover("skullwrite: game set looks like %s", describe_container(set))
-            for _, v in ipairs(values) do
-                pcall(function() set:Add(v) end)
+            lib:MakeGameplayTagContainerFromArray(tags, out)
+            local container = out.ReturnValue or out[1]
+            if container == nil then
+                for _, v in pairs(out) do container = v break end
             end
-            return set
-        end },
-    }
-
-    for _, a in ipairs(attempts) do
-        local payload = a.build()
-        if payload ~= nil then
-            local ok, err = pcall(function() comp.ActiveSkulls = payload end)
-            local hit, desc = verify()
-            Log.discover("skullwrite: %s -> write=%s, %d/%d present, now = %s",
-                a.desc, ok and "ok" or tostring(err), hit, #values, desc)
-            if hit == #values then
-                Log.info("skullwrite: VERIFIED via %s — skulls forced in-mission",
-                    a.desc)
-                return true
+            if container == nil then error("no container returned") end
+            comp.ActiveSkulls = container
+        end)
+        local after = read_tag_container(
+            try("read ActiveSkulls", function() return comp.ActiveSkulls end))
+        local hit = 0
+        for _, id in ipairs(ids) do
+            for _, name in ipairs(after or {}) do
+                if name:find(id, 1, true) then hit = hit + 1 break end
             end
-        else
-            Log.discover("skullwrite: %s -> payload unavailable", a.desc)
+        end
+        Log.discover("skullwrite: prefix %q -> write=%s, %d/%d tags present",
+            prefix, ok and "ok" or tostring(err), hit, #ids)
+        if hit == #ids then
+            Log.info("skullwrite: VERIFIED — skulls forced via tag prefix %q", prefix)
+            return true
         end
     end
-    Log.warn("skullwrite: no write shape landed; the game keeps its own skulls "
-        .. "(see the shapes above for which came closest)")
+    Log.warn("skullwrite: no tag prefix landed; the game keeps its own skulls. "
+        .. "The ACTIVE SKULL TAGS line above shows the real naming scheme.")
     return false
 end
 
