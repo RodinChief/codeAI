@@ -452,9 +452,23 @@ function Menuinject.close()
     close_submenu()
 end
 
+-- Is the entry both alive AND still hanging in the menu list? A widget can
+-- stay valid after being detached, which is exactly how the entry once went
+-- missing while the mod believed it was fine.
+local function injected_is_attached()
+    if not is_valid(injected) then return false end
+    if not is_valid(cached_parent) then return false end
+    local idx = try(function() return cached_parent:GetChildIndex(injected) end)
+    return type(idx) == "number" and idx >= 0
+end
+
 -- One injection attempt. Returns true when done (stops the retry loop).
 local function attempt()
-    if is_valid(injected) then return true end
+    if injected_is_attached() then return true end
+    if is_valid(injected) then
+        Log.warn("menuinject: ROGUELIKE entry lost its place in the menu — "
+            .. "rebuilding it")
+    end
     reset_all()
 
     local screen
@@ -518,9 +532,15 @@ local function attempt()
         return false
     end
 
-    -- Position directly below CAMPAIGN REMIX. AddChild appends to the end of
-    -- the list, so the entry has to be moved up; the panel API that does this
-    -- varies, hence the ordered attempts with the result logged.
+    -- Try to sit directly below CAMPAIGN REMIX. AddChild appends to the end,
+    -- so the entry would have to be moved up — but the container here is
+    -- HaloUIButtonContainer, whose ordering API is unknown.
+    --
+    -- Reordering is therefore attempted ONLY with non-destructive calls. An
+    -- earlier version fell back to RemoveChild + InsertChildAt; the insert
+    -- failed, the remove had already happened, and the ROGUELIKE entry
+    -- vanished from the menu entirely (on-device 2026-07-29, "got -1").
+    -- Being one row lower is a cosmetic flaw; losing the entry is not.
     local want = try(function() return parent:GetChildIndex(template) end)
     if type(want) == "number" and want >= 0 then
         want = want + 1
@@ -528,18 +548,31 @@ local function attempt()
             parent:ShiftChild(want, clone) return true
         end) or try(function()
             parent:ShiftChild(clone, want) return true
-        end) or try(function()
-            parent:RemoveChild(clone)
-            parent:InsertChildAt(want, clone)
-            return true
         end)
         local now = try(function() return parent:GetChildIndex(clone) end)
-        Log.discover("menuinject: position -> wanted index %d, got %s "
-            .. "(move=%s, panel=%s, children=%s)", want, tostring(now),
-            moved and "ok" or "unavailable",
+        -- Whatever happened above, the entry MUST still be in the list.
+        if type(now) ~= "number" or now < 0 then
+            try(function() parent:AddChild(clone) return true end)
+            now = try(function() return parent:GetChildIndex(clone) end)
+            Log.discover("menuinject: re-attached entry after a failed move")
+        end
+        Log.discover("menuinject: position -> wanted %d, at %s (move=%s, panel=%s)",
+            want, tostring(now), moved and "ok" or "unavailable",
             full_name(try(function() return parent:GetClass() end) or "?")
-                :gsub("^%S+%s", ""),
-            tostring(try(function() return parent:GetChildrenCount() end)))
+                :gsub("^%S+%s", ""))
+        -- Log the container's own API once, so the right ordering call can be
+        -- found instead of guessed: HaloUI is not in the reflection dumps.
+        if not moved then
+            local cls = try(function() return parent:GetClass() end)
+            local fns = {}
+            if cls then
+                pcall(function()
+                    cls:ForEachFunction(function(fn) fns[#fns + 1] = fstr(fn:GetFName()) end)
+                end)
+            end
+            Log.discover("menuinject: container functions: %s",
+                #fns > 0 and table.concat(fns, ", ") or "(none exposed)")
+        end
     end
 
     hook_clicks()
