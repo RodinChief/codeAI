@@ -27,9 +27,10 @@ local init_done = false
 -- after a launch, so the first event per floor is swallowed.
 local expect_spawn_event = false
 
--- Set by the map-load hook when a Solo mission map comes up; the launch
--- watchdog uses it to detect launches that reported OK but did nothing.
-local mission_map_seen = false
+-- Last world name seen by the polling loop, used to react to transitions
+-- (menu -> mission and back). Polled rather than hooked: RegisterLoadMapPost
+-- Hook fired only for the first world on-device.
+local last_world = nil
 
 -- ------------------------------------------------------------- floor flow
 
@@ -88,7 +89,6 @@ local function start_current_floor()
     end
 
     local skulls = State.active_skulls()
-    mission_map_seen = false
     local ok, err = Gameapi.launch_floor(fl, skulls)
     if ok then
         Ui.set_notice(nil)
@@ -97,20 +97,28 @@ local function start_current_floor()
         -- controller focus in-game (symptom: pause menu never shows).
         Menuinject.close()
         -- Watchdog: a launch call can report OK yet load nothing (seen
-        -- on-device with a wrong CampaignData asset). If no mission map is
-        -- up after 30s, put the floor back in briefing so the player can
-        -- simply select it again — next attempt avoids the dead path.
+        -- on-device with a wrong CampaignData asset). The check asks the
+        -- engine which world is loaded rather than trusting a map-load hook —
+        -- that hook fired only for the first world on-device and wrongly
+        -- reverted a floor whose mission had in fact loaded.
         pcall(function()
-            LoopAsync(30000, function()
-                if not mission_map_seen and State.run
-                    and State.run.floor_status == State.FLOOR.IN_MISSION then
-                    Log.warn("main: launch reported OK but no mission map "
-                        .. "loaded within 30s — reverting floor to briefing")
+            LoopAsync(45000, function()
+                if not (State.run
+                    and State.run.floor_status == State.FLOOR.IN_MISSION) then
+                    return true
+                end
+                local in_mission = Gameapi.in_mission_world()
+                if in_mission == false then
+                    Log.warn("main: launch reported OK but no mission world is "
+                        .. "loaded after 45s — reverting floor to briefing")
                     Gameapi.distrust_campmenu_launch()
                     State.run.floor_status = State.FLOOR.BRIEFING
                     State.save()
                     Ui.set_notice("Launch did not take — select the floor again")
                     Ui.dirty()
+                else
+                    Log.info("main: mission world confirmed loaded (%s)",
+                        tostring(Gameapi.current_world_name()))
                 end
                 return true
             end)
@@ -318,22 +326,7 @@ local function finish_init(build_ok, build)
                 end)
                 if ok and s then parts[#parts + 1] = s end
             end
-            local joined = table.concat(parts, " | ")
-            Log.discover("map loaded: %s", joined)
-            ExecuteInGameThread(function()
-                pcall(Menuinject.close)
-            end)
-            if joined:find("/Solo/", 1, true) then
-                mission_map_seen = true
-                -- One-shot: let the mission finish loading, then dump the
-                -- skull component (LoopAsync stops on first true).
-                pcall(function()
-                    LoopAsync(20000, function()
-                        pcall(Gameapi.dump_skull_objects)
-                        return true
-                    end)
-                end)
-            end
+            Log.discover("map loaded: %s", table.concat(parts, " | "))
         end)
     end)
     Log.info("main: map-load logging %s", ok_hook and "active" or "unavailable")
@@ -365,6 +358,38 @@ local function deferred_init()
     return true
 end
 
+-- World-transition watcher, polled once per second. Reacts to menu <-> mission
+-- changes: closes the submenu so no mod row is left focusable over gameplay,
+-- and kicks the one-off in-mission skull discovery.
+local skull_dump_done = false
+function watch_world()
+    local world = Gameapi.current_world_name()
+    if not world or world == last_world then return end
+    local was, now = last_world, world
+    last_world = world
+    Log.discover("main: world changed -> %s", world)
+    pcall(Menuinject.close)
+
+    local entering_mission = world:find("/Solo/", 1, true) ~= nil
+    if entering_mission and not skull_dump_done then
+        -- Let the mission settle, then dump the skull component once.
+        skull_dump_done = true
+        pcall(function()
+            LoopAsync(20000, function()
+                pcall(Gameapi.dump_skull_objects)
+                return true
+            end)
+        end)
+    end
+    -- Leaving a mission for the menus: the floor is NOT auto-completed here.
+    -- Quitting to the menu looks identical to finishing, and no reliable
+    -- mission-complete event has been found yet, so completion stays manual.
+    if was and was:find("/Solo/", 1, true) and not entering_mission then
+        Log.info("main: returned from mission to %s (floor completion is still "
+            .. "confirmed manually)", world)
+    end
+end
+
 register_keybinds()
 
 -- LoopAsync(interval_ms, fn): fn returning true stops the loop.
@@ -388,6 +413,7 @@ local ok_loop = pcall(function()
             -- Mirror the run state into native rows inside the main menu, so
             -- the mode is visible in the game window itself.
             pcall(function() Menuinject.set_status_lines(Ui.compact_lines()) end)
+            pcall(watch_world)
         end
         return false
     end)

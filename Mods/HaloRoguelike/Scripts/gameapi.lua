@@ -531,15 +531,31 @@ function Gameapi.launch_floor(floor, active_skulls)
     -- instead of being set on a lobby the launch then overwrites.
     local flow = campaign_flow_subsystem()
     if flow and cd then
-        local opts = scenario_game_options(diff_index, rally_index,
-            Gameapi.skull_enum_values(active_skulls))
-        local ok, err = pcall(function()
-            return flow:SetAndBeginCampaign(cd, FName(scen), opts)
-        end)
-        Log.discover("launch: SetAndBeginCampaign(%s, %q, {diff=%d, rally=%d}) -> %s",
-            full_name(cd), scen, diff_index, rally_index,
-            ok and "OK" or tostring(err))
-        if ok then return true end
+        local skull_vals = Gameapi.skull_enum_values(active_skulls)
+        Log.discover("launch: skull enum values = %s",
+            skull_vals and ("[" .. table.concat(skull_vals, ",") .. "]")
+            or "none yet (Campaign Remix keeps its own skulls)")
+
+        -- With skulls first; if the TSet cannot be marshalled from a Lua
+        -- table the same call is retried without them, so a skull problem
+        -- can never cost the launch itself.
+        local attempts = {}
+        if skull_vals then
+            attempts[#attempts + 1] = { desc = "with skulls",
+                opts = scenario_game_options(diff_index, rally_index, skull_vals) }
+        end
+        attempts[#attempts + 1] = { desc = "no skulls",
+            opts = scenario_game_options(diff_index, rally_index, nil) }
+
+        for _, a in ipairs(attempts) do
+            local ok, err = pcall(function()
+                return flow:SetAndBeginCampaign(cd, FName(scen), a.opts)
+            end)
+            Log.discover("launch: SetAndBeginCampaign(%q, {diff=%d, rally=%d, %s}) -> %s",
+                scen, diff_index, rally_index, a.desc,
+                ok and "OK" or tostring(err))
+            if ok then return true end
+        end
         Log.discover("launch: subsystem path failed — falling back to the menu call")
     else
         Log.discover("launch: campaign flow subsystem %s, campaign data %s",
@@ -723,22 +739,78 @@ function Gameapi.resume_remix_save()
     return ok
 end
 
+-- ------------------------------------------------------------ world
+
+-- Name of the world that is currently loaded, e.g.
+--   "World /Game/Levels/Halo1/Solo/B30/B30.B30"      (in a mission)
+--   "World /Game/Levels/UI/Frontend/Frontend.Frontend" (in the menus)
+--
+-- RegisterLoadMapPostHook proved unreliable here: on-device it fired for the
+-- first Frontend load and never again, including for the mission map that
+-- demonstrably loaded (2026-07-29 log). Polling the live world is stable.
+function Gameapi.current_world_name()
+    for _, cls in ipairs({ "PlayerController", "GameModeBase", "HUD" }) do
+        local obj = find_first(cls)
+        if obj then
+            local w = try("GetWorld", function() return obj:GetWorld() end)
+            if w and w:IsValid() then
+                local n = full_name(w)
+                if n and n ~= "?" then return n end
+            end
+        end
+    end
+    return nil
+end
+
+-- True while a campaign mission map is loaded (Solo levels live under
+-- /Game/Levels/Halo1/Solo/<ID>/<ID>, confirmed on-device).
+function Gameapi.in_mission_world()
+    local n = Gameapi.current_world_name()
+    if not n then return nil end -- unknown, not "no"
+    return n:find("/Solo/", 1, true) ~= nil
+end
+
 -- ------------------------------------------------------------ enums
 --
 -- The CXX header dump names the enums (EBlamGameSkulls,
 -- EBlamCampaignDifficultyLevel) but not their members, so the values are read
 -- from the live UEnum objects instead. Resolved values are cached here and
 -- written to the log in a form that can be pasted straight into const.lua.
-local ENUM_PATHS = {
-    skulls     = "/Script/BlamEngine.EBlamGameSkulls",
-    difficulty = "/Script/BlamEngine.EBlamCampaignDifficultyLevel",
+local ENUM_NAMES = {
+    skulls     = "EBlamGameSkulls",
+    difficulty = "EBlamCampaignDifficultyLevel",
 }
 local enum_values = {}   -- kind -> { [NAME] = value }
+local enum_objects = nil -- short name -> UEnum, filled by one array scan
+
+-- Locate the UEnum objects. The header dump does not say which package
+-- declares them and guessing paths failed on-device ("enum object not found"),
+-- so they are found by scanning GUObjectArray for "Enum <pkg>.<Name>".
+local function find_enum_objects()
+    if enum_objects then return enum_objects end
+    enum_objects = {}
+    local want = {}
+    for _, n in pairs(ENUM_NAMES) do want[n] = true end
+    pcall(function()
+        ForEachUObject(function(obj)
+            pcall(function()
+                local name = fstr(obj:GetFullName())
+                if not name:find("^Enum ") then return end
+                local short = name:match("%.([%w_]+)$")
+                if short and want[short] and not enum_objects[short] then
+                    enum_objects[short] = obj
+                    Log.discover("enum found: %s", name)
+                end
+            end)
+        end)
+    end)
+    return enum_objects
+end
 
 -- Read a UEnum's members. UE4SS exposes no single guaranteed API for this, so
 -- several read-only approaches are tried and whichever works is used.
-local function read_enum(path)
-    local e = try("find enum " .. path, StaticFindObject, path)
+local function read_enum(short_name)
+    local e = find_enum_objects()[short_name]
     if not (e and e:IsValid()) then return nil, "enum object not found" end
     local out = {}
 
@@ -781,8 +853,8 @@ end
 -- in const.lua; the difficulty list confirms the Easy/Normal/Heroic/Legendary
 -- ordering the launch call relies on.
 function Gameapi.dump_enums()
-    for kind, path in pairs(ENUM_PATHS) do
-        local vals, err = read_enum(path)
+    for kind, short in pairs(ENUM_NAMES) do
+        local vals, err = read_enum(short)
         if vals then
             enum_values[kind] = vals
             local parts = {}
