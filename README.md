@@ -8,6 +8,10 @@ visibility-modifier roll for free.
 
 Full design brief: [`docs/BRIEF.md`](docs/BRIEF.md).
 
+**Picking this up fresh? Start at [`docs/HANDOFF.md`](docs/HANDOFF.md)** — current
+status, every confirmed game-API fact, and the rules that stop you crashing the
+game with reflection.
+
 ## The run
 
 | Floor | Difficulty | Skulls |
